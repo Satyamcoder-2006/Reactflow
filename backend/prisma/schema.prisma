@@ -1,0 +1,397 @@
+// ReactFlow Database Schema
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== USER & AUTH ====================
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String?
+  avatarUrl       String?
+  
+  // GitHub OAuth
+  githubId        String    @unique
+  githubUsername  String
+  githubToken     String    // Encrypted
+  
+  // Subscription
+  plan            UserPlan  @default(FREE)
+  stripeCustomerId String?  @unique
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  lastLoginAt     DateTime?
+  
+  repos           Repo[]
+  builds          Build[]
+  sessions        EmulatorSession[]
+  
+  @@index([githubId])
+  @@index([email])
+}
+
+enum UserPlan {
+  FREE
+  DEVELOPER
+  TEAM
+  ENTERPRISE
+}
+
+// ==================== REPOSITORY ====================
+
+model Repo {
+  id              String    @id @default(cuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // GitHub Info
+  githubRepoId    String    @unique
+  fullName        String    // "owner/repo"
+  owner           String
+  name            String
+  defaultBranch   String    @default("main")
+  isPrivate       Boolean   @default(false)
+  
+  // Webhook
+  webhookId       String?
+  webhookSecret   String?
+  
+  // Status
+  isActive        Boolean   @default(true)
+  lastSyncAt      DateTime?
+  
+  // Configuration
+  autoDeployEnabled Boolean @default(true)
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  builds          Build[]
+  shells          RepoShell[]
+  metroInstances  MetroInstance[]
+  sessions        EmulatorSession[]
+  
+  @@index([userId])
+  @@index([githubRepoId])
+  @@index([fullName])
+}
+
+// ==================== SHELL APK ====================
+
+model Shell {
+  id              String    @id @default(cuid())
+  
+  // Caching Key
+  dependencyHash  String    @unique  // SHA-256 hash of native dependencies
+  
+  // Build Info
+  apkUrl          String
+  apkSize         Int       // bytes
+  buildTime       Int       // seconds
+  
+  // Metadata
+  reactNativeVersion String
+  expoVersion     String?
+  dependencies    Json      // List of native packages with versions
+  
+  // Gradle Info
+  gradleVersion   String?
+  androidSdkVersion Int?
+  
+  // Stats
+  usageCount      Int       @default(0)
+  
+  createdAt       DateTime  @default(now())
+  lastUsedAt      DateTime  @updatedAt
+  
+  repoShells      RepoShell[]
+  sessions        EmulatorSession[]
+  
+  @@index([dependencyHash])
+  @@index([lastUsedAt])
+}
+
+model RepoShell {
+  id              String    @id @default(cuid())
+  
+  repoId          String
+  repo            Repo      @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  
+  shellId         String
+  shell           Shell     @relation(fields: [shellId], references: [id])
+  
+  isCurrent       Boolean   @default(true)
+  
+  createdAt       DateTime  @default(now())
+  
+  @@unique([repoId, shellId])
+  @@index([repoId])
+}
+
+// ==================== BUILD SYSTEM ====================
+
+model Build {
+  id              String      @id @default(cuid())
+  repoId          String
+  repo            Repo        @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Git Info
+  branch          String
+  commit          String
+  commitMessage   String?
+  commitAuthor    String?
+  
+  // Build Type
+  buildType       BuildType   @default(SHELL)
+  triggerType     TriggerType @default(WEBHOOK)
+  
+  // Status
+  status          BuildStatus @default(QUEUED)
+  
+  // Timing
+  queuedAt        DateTime    @default(now())
+  startedAt       DateTime?
+  completedAt     DateTime?
+  buildDuration   Int?        // seconds
+  
+  // Output
+  shellId         String?
+  apkUrl          String?
+  apkSize         Int?
+  
+  // Build Info
+  gradleCacheHit  Boolean?
+  npmCacheHit     Boolean?
+  
+  // Logs
+  logs            BuildLog[]
+  
+  // Error Info
+  error           String?     @db.Text
+  errorStack      String?     @db.Text
+  
+  @@index([repoId])
+  @@index([userId])
+  @@index([status])
+  @@index([buildType])
+  @@index([queuedAt])
+}
+
+enum BuildType {
+  SHELL          // Full native build
+  HOT_RELOAD     // JS-only update
+}
+
+enum TriggerType {
+  WEBHOOK        // GitHub push
+  MANUAL         // User triggered
+  SCHEDULED      // Cron job
+}
+
+enum BuildStatus {
+  QUEUED
+  BUILDING
+  SUCCESS
+  FAILED
+  CANCELLED
+  TIMEOUT
+}
+
+model BuildLog {
+  id              String    @id @default(cuid())
+  buildId         String
+  build           Build     @relation(fields: [buildId], references: [id], onDelete: Cascade)
+  
+  timestamp       DateTime  @default(now())
+  level           LogLevel  @default(INFO)
+  message         String    @db.Text
+  
+  // Metadata for filtering
+  phase           String?   // "setup", "gradle", "metro", etc.
+  
+  @@index([buildId])
+  @@index([timestamp])
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+  SUCCESS
+}
+
+// ==================== METRO BUNDLER ====================
+
+model MetroInstance {
+  id              String        @id @default(cuid())
+  repoId          String        @unique
+  repo            Repo          @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  
+  // Container Info
+  containerId     String
+  containerName   String
+  
+  // Network
+  httpPort        Int
+  wsPort          Int
+  
+  // Status
+  status          MetroStatus   @default(STARTING)
+  
+  // Timing
+  startedAt       DateTime      @default(now())
+  lastHealthCheck DateTime?
+  lastBundleAt    DateTime?     // Last time a bundle was generated
+  
+  // Stats
+  bundleCount     Int           @default(0)
+  errorCount      Int           @default(0)
+  
+  // Auto-shutdown
+  idleTimeout     Int           @default(3600) // seconds
+  lastActivity    DateTime      @default(now())
+  
+  sessions        EmulatorSession[]
+  
+  @@index([repoId])
+  @@index([status])
+}
+
+enum MetroStatus {
+  STARTING
+  READY
+  BUNDLING
+  ERROR
+  STOPPED
+}
+
+// ==================== EMULATOR SESSIONS ====================
+
+model EmulatorSession {
+  id              String          @id @default(cuid())
+  
+  repoId          String
+  repo            Repo            @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  
+  userId          String
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  shellId         String
+  shell           Shell           @relation(fields: [shellId], references: [id])
+  
+  metroId         String?
+  metro           MetroInstance?  @relation(fields: [metroId], references: [id])
+  
+  // Container Info
+  containerId     String          @unique
+  containerName   String
+  
+  // Network
+  adbPort         Int
+  webrtcPort      Int?
+  
+  // WebRTC
+  webrtcUrl       String?
+  signalingUrl    String?
+  
+  // Status
+  status          SessionStatus   @default(STARTING)
+  
+  // Timing
+  startedAt       DateTime        @default(now())
+  lastActivity    DateTime        @default(now())
+  stoppedAt       DateTime?
+  
+  // Session Duration
+  maxDuration     Int             @default(7200) // 2 hours
+  
+  // Stats
+  reloadCount     Int             @default(0)
+  interactionCount Int            @default(0)
+  
+  @@index([repoId])
+  @@index([userId])
+  @@index([status])
+  @@index([lastActivity])
+}
+
+enum SessionStatus {
+  STARTING
+  INSTALLING_APK
+  RUNNING
+  IDLE
+  STOPPING
+  STOPPED
+  ERROR
+}
+
+// ==================== CHANGE DETECTION ====================
+
+model ChangeAnalysis {
+  id              String    @id @default(cuid())
+  repoId          String
+  
+  // Git Info
+  beforeCommit    String
+  afterCommit     String
+  
+  // Analysis Results
+  hasNativeChanges Boolean
+  hasJsChanges    Boolean
+  hasAssetChanges Boolean
+  
+  // Changed Files
+  changedFiles    Json      // Array of file paths
+  nativeFiles     Json      // Array of native files
+  jsFiles         Json      // Array of JS files
+  
+  // Decision
+  actionTaken     String    // "SHELL_REBUILD" | "HOT_RELOAD" | "NO_ACTION"
+  
+  createdAt       DateTime  @default(now())
+  
+  @@index([repoId])
+  @@index([afterCommit])
+}
+
+// ==================== USAGE & BILLING ====================
+
+model UsageRecord {
+  id              String    @id @default(cuid())
+  userId          String
+  
+  // Resource Type
+  resourceType    ResourceType
+  
+  // Usage
+  quantity        Float     // build minutes, storage GB, etc.
+  unit            String    // "minutes", "GB", "count"
+  
+  // Cost
+  cost            Float?    // In cents
+  
+  // Metadata
+  metadata        Json?     // buildId, sessionId, etc.
+  
+  createdAt       DateTime  @default(now())
+  
+  @@index([userId])
+  @@index([createdAt])
+}
+
+enum ResourceType {
+  BUILD_TIME
+  STORAGE
+  EMULATOR_TIME
+  BANDWIDTH
+}

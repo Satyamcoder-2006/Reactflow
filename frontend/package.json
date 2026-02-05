@@ -1,0 +1,43 @@
+{
+  "name": "reactflow-frontend",
+  "version": "1.0.0",
+  "description": "ReactFlow - Cloud React Native Development Platform Frontend",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "next-auth": "^5.0.0-beta.22",
+    "zustand": "^5.0.1",
+    "@tanstack/react-query": "^5.59.20",
+    "socket.io-client": "^4.7.5",
+    "simple-peer": "^9.11.1",
+    "axios": "^1.7.7",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.5.4",
+    "class-variance-authority": "^0.7.0",
+    "lucide-react": "^0.454.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.10",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.1",
+    "@types/simple-peer": "^9.11.8",
+    "typescript": "^5.6.2",
+    "tailwindcss": "^3.4.14",
+    "postcss": "^8.4.47",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^14.2.15"
+  },
+  "main": "index.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs"
+}

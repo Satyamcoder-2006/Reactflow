@@ -1,0 +1,238 @@
+import Docker from 'dockerode';
+import { EventEmitter } from 'events';
+import { logger } from '../utils/logger';
+import { env } from '../config/env';
+
+export class DockerService extends EventEmitter {
+    private docker: Docker;
+
+    constructor() {
+        super();
+        this.docker = new Docker();
+    }
+
+    /**
+     * Build shell APK in Docker container
+     */
+    async buildShellAPK(config: {
+        repoUrl: string;
+        branch: string;
+        commit: string;
+        buildId: string;
+    }): Promise<string> {
+        const containerName = `build-${config.buildId}`;
+
+        logger.info(`Creating build container: ${containerName}`);
+
+        const container = await this.docker.createContainer({
+            Image: 'android-builder:latest',
+            name: containerName,
+            Env: [
+                `REPO_URL=${config.repoUrl}`,
+                `BRANCH=${config.branch}`,
+                `COMMIT=${config.commit}`,
+                `BUILD_ID=${config.buildId}`,
+                `AWS_ACCESS_KEY_ID=${env.AWS_ACCESS_KEY_ID}`,
+                `AWS_SECRET_ACCESS_KEY=${env.AWS_SECRET_ACCESS_KEY}`,
+                `S3_BUCKET=${env.S3_BUCKET}`,
+            ],
+            HostConfig: {
+                Memory: 8 * 1024 * 1024 * 1024, // 8GB
+                CpuQuota: 400000, // 4 cores
+                Binds: [
+                    `${env.GRADLE_CACHE_PATH}:/cache/gradle`,
+                    `${env.NPM_CACHE_PATH}:/root/.npm`,
+                ],
+                AutoRemove: false, // Keep container for log inspection
+            },
+        });
+
+        // Attach to container output
+        const stream = await container.attach({
+            stream: true,
+            stdout: true,
+            stderr: true,
+        });
+
+        stream.on('data', (chunk) => {
+            const log = chunk.toString('utf8');
+            this.emit('log', { buildId: config.buildId, message: log });
+        });
+
+        // Start container
+        logger.info(`Starting build container: ${containerName}`);
+        await container.start();
+
+        // Wait for completion
+        const result = await container.wait();
+
+        // Get APK URL
+        const apkUrl = `s3://${env.S3_BUCKET}/shells/${config.commit}/app-debug.apk`;
+
+        // Cleanup
+        logger.info(`Removing build container: ${containerName}`);
+        await container.remove();
+
+        if (result.StatusCode !== 0) {
+            throw new Error(`Build failed with exit code ${result.StatusCode}`);
+        }
+
+        return apkUrl;
+    }
+
+    /**
+     * Start Metro bundler container
+     */
+    async startMetro(config: {
+        repoId: string;
+        repoPath: string;
+    }): Promise<{ containerId: string; httpPort: number; wsPort: number }> {
+        const containerName = `metro-${config.repoId}`;
+
+        logger.info(`Creating Metro container: ${containerName}`);
+
+        const container = await this.docker.createContainer({
+            Image: 'metro-server:latest',
+            name: containerName,
+            Env: [`REPO_PATH=${config.repoPath}`],
+            ExposedPorts: {
+                '8081/tcp': {},
+                '8082/tcp': {},
+            },
+            HostConfig: {
+                PortBindings: {
+                    '8081/tcp': [{ HostPort: '0' }], // Random port
+                    '8082/tcp': [{ HostPort: '0' }],
+                },
+                Binds: [`${config.repoPath}:/app/repo:ro`],
+            },
+        });
+
+        await container.start();
+
+        const inspect = await container.inspect();
+        const httpPort = parseInt(inspect.NetworkSettings.Ports['8081/tcp'][0].HostPort);
+        const wsPort = parseInt(inspect.NetworkSettings.Ports['8082/tcp'][0].HostPort);
+
+        logger.info(`Metro started: ${containerName} (HTTP:${httpPort}, WS:${wsPort})`);
+
+        return {
+            containerId: container.id,
+            httpPort,
+            wsPort,
+        };
+    }
+
+    /**
+     * Start Redroid emulator
+     */
+    async startEmulator(config: {
+        sessionId: string;
+        shellApkUrl: string;
+        metroUrl: string;
+    }): Promise<{ containerId: string; adbPort: number }> {
+        const containerName = `emulator-${config.sessionId}`;
+
+        logger.info(`Creating emulator container: ${containerName}`);
+
+        const container = await this.docker.createContainer({
+            Image: 'redroid:latest',
+            name: containerName,
+            Privileged: true,
+            Env: [`METRO_URL=${config.metroUrl}`, `SHELL_APK_URL=${config.shellApkUrl}`],
+            ExposedPorts: {
+                '5555/tcp': {}, // ADB
+            },
+            HostConfig: {
+                PortBindings: {
+                    '5555/tcp': [{ HostPort: '0' }],
+                },
+            },
+        });
+
+        await container.start();
+
+        const inspect = await container.inspect();
+        const adbPort = parseInt(inspect.NetworkSettings.Ports['5555/tcp'][0].HostPort);
+
+        logger.info(`Emulator started: ${containerName} (ADB:${adbPort})`);
+
+        return {
+            containerId: container.id,
+            adbPort,
+        };
+    }
+
+    /**
+     * Stop and remove container
+     */
+    async stopContainer(containerId: string) {
+        try {
+            const container = this.docker.getContainer(containerId);
+            logger.info(`Stopping container: ${containerId}`);
+            await container.stop({ t: 10 }); // 10 second timeout
+            await container.remove();
+            logger.info(`Container removed: ${containerId}`);
+        } catch (error) {
+            logger.error(`Failed to stop container ${containerId}:`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Execute command in container
+     */
+    async execInContainer(containerId: string, cmd: string[]): Promise<string> {
+        const container = this.docker.getContainer(containerId);
+
+        const exec = await container.exec({
+            Cmd: cmd,
+            AttachStdout: true,
+            AttachStderr: true,
+        });
+
+        const stream = await exec.start({ Detach: false });
+
+        return new Promise((resolve, reject) => {
+            let output = '';
+
+            stream.on('data', (chunk) => {
+                output += chunk.toString('utf8');
+            });
+
+            stream.on('end', () => {
+                resolve(output);
+            });
+
+            stream.on('error', reject);
+        });
+    }
+
+    /**
+     * Check if container is running
+     */
+    async isContainerRunning(containerId: string): Promise<boolean> {
+        try {
+            const container = this.docker.getContainer(containerId);
+            const info = await container.inspect();
+            return info.State.Running;
+        } catch (error) {
+            return false;
+        }
+    }
+
+    /**
+     * Get container logs
+     */
+    async getContainerLogs(containerId: string, tail: number = 100): Promise<string> {
+        const container = this.docker.getContainer(containerId);
+
+        const logs = await container.logs({
+            stdout: true,
+            stderr: true,
+            tail,
+        });
+
+        return logs.toString('utf8');
+    }
+}
