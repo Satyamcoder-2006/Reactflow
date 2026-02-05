@@ -64,15 +64,19 @@ export async function buildApp(): Promise<FastifyInstance> {
     app.decorate('io', io);
 
     // Register routes
+    const { authRoutes } = await import('./routes/auth');
     const { repoRoutes } = await import('./routes/repos');
     const { buildRoutes } = await import('./routes/builds');
     const { sessionRoutes } = await import('./routes/sessions');
     const { webhookRoutes } = await import('./routes/webhooks');
+    const { webrtcRoutes } = await import('./routes/webrtc');
 
+    await app.register(authRoutes, { prefix: '/api/auth' });
     await app.register(repoRoutes, { prefix: '/api/repos' });
     await app.register(buildRoutes, { prefix: '/api/builds' });
     await app.register(sessionRoutes, { prefix: '/api/sessions' });
     await app.register(webhookRoutes, { prefix: '/api/webhooks' });
+    await app.register(webrtcRoutes, { prefix: '/api/webrtc' });
 
     return app;
 }
