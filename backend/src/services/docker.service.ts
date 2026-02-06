@@ -1,5 +1,6 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
+import path from 'path';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
 
@@ -32,18 +33,18 @@ export class DockerService extends EventEmitter {
                 `BRANCH=${config.branch}`,
                 `COMMIT=${config.commit}`,
                 `BUILD_ID=${config.buildId}`,
-                `AWS_ACCESS_KEY_ID=${env.AWS_ACCESS_KEY_ID}`,
-                `AWS_SECRET_ACCESS_KEY=${env.AWS_SECRET_ACCESS_KEY}`,
-                `S3_BUCKET=${env.S3_BUCKET}`,
+                `BACKEND_URL=${env.BACKEND_URL}`,
             ],
             HostConfig: {
-                Memory: 8 * 1024 * 1024 * 1024, // 8GB
+                Memory: 4 * 1024 * 1024 * 1024, // 4GB is enough for most RN builds
                 CpuQuota: 400000, // 4 cores
                 Binds: [
                     `${env.GRADLE_CACHE_PATH}:/cache/gradle`,
                     `${env.NPM_CACHE_PATH}:/root/.npm`,
+                    // Mount uploads directory so container can save APK directly
+                    `${path.join(process.cwd(), 'uploads')}:/app/uploads`,
                 ],
-                AutoRemove: false, // Keep container for log inspection
+                AutoRemove: false,
             },
         });
 
@@ -54,7 +55,7 @@ export class DockerService extends EventEmitter {
             stderr: true,
         });
 
-        stream.on('data', (chunk) => {
+        stream.on('data', (chunk: Buffer) => {
             const log = chunk.toString('utf8');
             this.emit('log', { buildId: config.buildId, message: log });
         });
@@ -67,7 +68,7 @@ export class DockerService extends EventEmitter {
         const result = await container.wait();
 
         // Get APK URL
-        const apkUrl = `s3://${env.S3_BUCKET}/shells/${config.commit}/app-debug.apk`;
+        const apkUrl = `${env.BACKEND_URL}/storage/shells/${config.commit}/app-debug.apk`;
 
         // Cleanup
         logger.info(`Removing build container: ${containerName}`);
@@ -196,7 +197,7 @@ export class DockerService extends EventEmitter {
         return new Promise((resolve, reject) => {
             let output = '';
 
-            stream.on('data', (chunk) => {
+            stream.on('data', (chunk: Buffer) => {
                 output += chunk.toString('utf8');
             });
 

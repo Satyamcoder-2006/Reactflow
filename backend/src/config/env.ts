@@ -18,12 +18,6 @@ export const env = {
     GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET!,
     GITHUB_REDIRECT_URI: process.env.GITHUB_REDIRECT_URI!,
 
-    // AWS S3
-    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID!,
-    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY!,
-    AWS_REGION: process.env.AWS_REGION || 'us-east-1',
-    S3_BUCKET: process.env.S3_BUCKET!,
-
     // Build
     BUILD_CONCURRENCY: parseInt(process.env.BUILD_CONCURRENCY || '5'),
     GRADLE_CACHE_PATH: process.env.GRADLE_CACHE_PATH || '/var/cache/gradle',
@@ -31,6 +25,7 @@ export const env = {
 
     // API
     API_PORT: parseInt(process.env.API_PORT || '3001'),
+    BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3001',
     FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:3000',
 
     // Logging

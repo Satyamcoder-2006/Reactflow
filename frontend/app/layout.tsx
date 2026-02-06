@@ -1,5 +1,5 @@
 import { Inter } from 'next/font/google';
-import '../styles/globals.css';
+import './globals.css';
 import { ToastProvider } from '@/lib/context/ToastContext';
 
 const inter = Inter({ subsets: ['latin'] });

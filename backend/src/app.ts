@@ -25,6 +25,13 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     await app.register(websocket);
 
+    // Serve static files from uploads directory
+    const path = require('path');
+    await app.register(require('@fastify/static'), {
+        root: path.join(process.cwd(), 'uploads'),
+        prefix: '/storage/', // accessible via /storage/filename.ext
+    });
+
     // Health check
     app.get('/health', async () => {
         return {

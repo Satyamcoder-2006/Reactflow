@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ReactNode } from 'react';
+import { ReactNode, useEffect, useState } from 'react';
 import {
     LayoutDashboard,
     FolderGit2,
@@ -12,12 +12,55 @@ import {
     User
 } from 'lucide-react';
 
+import { apiClient } from '@/lib/api/client';
+import { useRouter } from 'next/navigation';
+
 interface DashboardLayoutProps {
     children: ReactNode;
 }
 
 export function DashboardLayout({ children }: DashboardLayoutProps) {
     const pathname = usePathname();
+    const router = useRouter();
+    const [user, setUser] = useState<any>(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const initAuth = async () => {
+            if (typeof window !== 'undefined') {
+                // Check URL token first
+                const urlParams = new URLSearchParams(window.location.search);
+                const token = urlParams.get('token');
+                if (token) {
+                    localStorage.setItem('token', token);
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                }
+
+                // Verify token and get user
+                try {
+                    const response = await apiClient.getUser();
+                    setUser(response.data.user);
+                } catch (error) {
+                    // Invalid token or session expired
+                    localStorage.removeItem('token');
+                    router.push('/login');
+                } finally {
+                    setLoading(false);
+                }
+            }
+        };
+
+        initAuth();
+    }, [router]);
+
+    const handleLogout = async () => {
+        try {
+            await apiClient.logout();
+        } finally {
+            localStorage.removeItem('token');
+            router.push('/login');
+        }
+    };
 
     const navigation = [
         { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
@@ -26,6 +69,14 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
     ];
 
     const isActive = (href: string) => pathname?.startsWith(href);
+
+    if (loading) {
+        return (
+            <div className="min-h-screen flex items-center justify-center bg-background">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+            </div>
+        );
+    }
 
     return (
         <div className="min-h-screen bg-background">
@@ -45,8 +96,8 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                                 key={item.name}
                                 href={item.href}
                                 className={`flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors ${isActive(item.href)
-                                        ? 'bg-primary text-primary-foreground'
-                                        : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
+                                    ? 'bg-primary text-primary-foreground'
+                                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'
                                     }`}
                             >
                                 <item.icon className="h-5 w-5" />
@@ -58,15 +109,22 @@ export function DashboardLayout({ children }: DashboardLayoutProps) {
                     {/* User Profile */}
                     <div className="p-4 border-t border-border">
                         <div className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-accent cursor-pointer">
-                            <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-                                <User className="h-4 w-4 text-primary-foreground" />
-                            </div>
+                            {user?.avatarUrl ? (
+                                <img src={user.avatarUrl} alt={user.name} className="w-8 h-8 rounded-full" />
+                            ) : (
+                                <div className="w-8 h-8 rounded-full bg-primary flex items-center justify-center">
+                                    <User className="h-4 w-4 text-primary-foreground" />
+                                </div>
+                            )}
                             <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium truncate">Developer</p>
-                                <p className="text-xs text-muted-foreground truncate">Logged in</p>
+                                <p className="text-sm font-medium truncate">{user?.name || 'Developer'}</p>
+                                <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
                             </div>
                         </div>
-                        <button className="w-full mt-2 flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors">
+                        <button
+                            onClick={handleLogout}
+                            className="w-full mt-2 flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-accent rounded-md transition-colors"
+                        >
                             <LogOut className="h-4 w-4" />
                             Logout
                         </button>

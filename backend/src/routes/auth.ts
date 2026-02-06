@@ -51,7 +51,7 @@ export async function authRoutes(app: FastifyInstance) {
                     email: githubUser.email || `${githubUser.login}@github.local`,
                     name: githubUser.name || githubUser.login,
                     avatarUrl: githubUser.avatar_url,
-                    githubLogin: githubUser.login,
+                    githubUsername: githubUser.login,
                     githubToken: encrypt(accessToken, env.JWT_SECRET),
                     plan: 'FREE',
                 },
@@ -67,7 +67,7 @@ export async function authRoutes(app: FastifyInstance) {
             const token = app.jwt.sign({
                 id: user.id,
                 email: user.email,
-                githubLogin: user.githubLogin,
+                githubUsername: user.githubUsername,
             });
 
             return { token, user: { id: user.id, email: user.email, name: user.name } };
@@ -90,7 +90,7 @@ export async function authRoutes(app: FastifyInstance) {
                     email: true,
                     name: true,
                     avatarUrl: true,
-                    githubLogin: true,
+                    githubUsername: true,
                     plan: true,
                     createdAt: true,
                 },

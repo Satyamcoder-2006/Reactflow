@@ -1,129 +1,97 @@
-import { s3, S3_BUCKET } from '../config/s3';
-import { logger } from '../utils/logger';
 import fs from 'fs';
 import path from 'path';
+import { pipeline } from 'stream/promises';
+import { env } from '../config/env';
 
 export class StorageService {
-    /**
-     * Upload file to S3
-     */
-    async uploadFile(localPath: string, s3Key: string): Promise<string> {
-        const fileStream = fs.createReadStream(localPath);
-        const fileName = path.basename(localPath);
+    private uploadDir: string;
+    private baseUrl: string;
 
-        const params = {
-            Bucket: S3_BUCKET,
-            Key: s3Key,
-            Body: fileStream,
-            ContentType: this.getContentType(fileName),
-        };
+    constructor() {
+        this.uploadDir = path.join(process.cwd(), 'uploads');
+        this.baseUrl = `${env.BACKEND_URL}/storage`;
 
-        logger.info(`Uploading ${localPath} to s3://${S3_BUCKET}/${s3Key}`);
-
-        await s3.upload(params).promise();
-
-        const url = `s3://${S3_BUCKET}/${s3Key}`;
-        logger.info(`Upload complete: ${url}`);
-
-        return url;
+        // Ensure upload directory exists
+        if (!fs.existsSync(this.uploadDir)) {
+            fs.mkdirSync(this.uploadDir, { recursive: true });
+        }
     }
 
     /**
-     * Download file from S3
+     * Upload a file to local storage
      */
-    async downloadFile(s3Url: string, localPath: string): Promise<void> {
-        const { bucket, key } = this.parseS3Url(s3Url);
+    async uploadFile(key: string, fileStream: any, contentType: string): Promise<string> {
+        const filePath = path.join(this.uploadDir, key);
+        const dir = path.dirname(filePath);
 
-        const params = {
-            Bucket: bucket,
-            Key: key,
-        };
-
-        logger.info(`Downloading ${s3Url} to ${localPath}`);
-
-        const data = await s3.getObject(params).promise();
-
-        fs.writeFileSync(localPath, data.Body as Buffer);
-
-        logger.info(`Download complete: ${localPath}`);
-    }
-
-    /**
-     * Get file size from S3
-     */
-    async getFileSize(s3Url: string): Promise<number> {
-        const { bucket, key } = this.parseS3Url(s3Url);
-
-        const params = {
-            Bucket: bucket,
-            Key: key,
-        };
-
-        const metadata = await s3.headObject(params).promise();
-
-        return metadata.ContentLength || 0;
-    }
-
-    /**
-     * Generate signed URL for download
-     */
-    async getSignedUrl(s3Url: string, expiresIn: number = 3600): Promise<string> {
-        const { bucket, key } = this.parseS3Url(s3Url);
-
-        const params = {
-            Bucket: bucket,
-            Key: key,
-            Expires: expiresIn,
-        };
-
-        return s3.getSignedUrlPromise('getObject', params);
-    }
-
-    /**
-     * Delete file from S3
-     */
-    async deleteFile(s3Url: string): Promise<void> {
-        const { bucket, key } = this.parseS3Url(s3Url);
-
-        const params = {
-            Bucket: bucket,
-            Key: key,
-        };
-
-        await s3.deleteObject(params).promise();
-
-        logger.info(`Deleted ${s3Url}`);
-    }
-
-    /**
-     * Parse S3 URL into bucket and key
-     */
-    private parseS3Url(s3Url: string): { bucket: string; key: string } {
-        const match = s3Url.match(/^s3:\/\/([^\/]+)\/(.+)$/);
-
-        if (!match) {
-            throw new Error(`Invalid S3 URL: ${s3Url}`);
+        // Ensure subdirectory exists
+        if (!fs.existsSync(dir)) {
+            await fs.promises.mkdir(dir, { recursive: true });
         }
 
-        return {
-            bucket: match[1],
-            key: match[2],
-        };
+        try {
+            // Handle buffer or stream
+            if (Buffer.isBuffer(fileStream)) {
+                await fs.promises.writeFile(filePath, fileStream);
+            } else {
+                const writeStream = fs.createWriteStream(filePath);
+                await pipeline(fileStream, writeStream);
+            }
+
+            // Return public URL
+            return `${this.baseUrl}/${key}`;
+        } catch (error) {
+            console.error('Local storage upload error:', error);
+            throw new Error(`Failed to upload file: ${key}`);
+        }
     }
 
     /**
-     * Get content type from file extension
+     * Get file read stream
      */
-    private getContentType(fileName: string): string {
-        const ext = path.extname(fileName).toLowerCase();
+    async getFileStream(key: string): Promise<fs.ReadStream> {
+        const filePath = path.join(this.uploadDir, key);
+        if (!fs.existsSync(filePath)) {
+            throw new Error(`File not found: ${key}`);
+        }
+        return fs.createReadStream(filePath);
+    }
 
-        const contentTypes: Record<string, string> = {
-            '.apk': 'application/vnd.android.package-archive',
-            '.json': 'application/json',
-            '.log': 'text/plain',
-            '.txt': 'text/plain',
-        };
+    /**
+     * Get signed URL (For local, just returns the public URL)
+     */
+    async getSignedUrl(key: string, expiresInSeconds = 3600): Promise<string> {
+        // For local storage, we just return the direct URL
+        // In a real prod environment, you might generate a temporary token here
+        return `${this.baseUrl}/${key}`;
+    }
 
-        return contentTypes[ext] || 'application/octet-stream';
+    /**
+     * Delete file
+     */
+    async deleteFile(key: string): Promise<void> {
+        const filePath = path.join(this.uploadDir, key);
+        try {
+            if (fs.existsSync(filePath)) {
+                await fs.promises.unlink(filePath);
+            }
+        } catch (error) {
+            console.error('Local storage delete error:', error);
+            // Ignore if file doesn't exist
+        }
+    }
+
+    /**
+     * Get file size
+     */
+    async getFileSize(key: string): Promise<number> {
+        // If key is a URL, extract the path
+        const fileKey = key.includes(this.baseUrl)
+            ? key.replace(`${this.baseUrl}/`, '')
+            : key;
+
+        const filePath = path.join(this.uploadDir, fileKey);
+        const stats = await fs.promises.stat(filePath);
+        return stats.size;
     }
 }

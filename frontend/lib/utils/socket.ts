@@ -27,7 +27,7 @@ export function getSocket(): Socket {
     return socket;
 }
 
-export function subscribeTouild(buildId: string) {
+export function subscribeToBuild(buildId: string) {
     const socket = getSocket();
     socket.emit('subscribe:build', buildId);
 }

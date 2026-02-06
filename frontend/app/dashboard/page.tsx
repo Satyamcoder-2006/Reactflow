@@ -3,33 +3,27 @@
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import Link from 'next/link';
 import { GitBranch, Clock, CheckCircle2, XCircle, Plus, ExternalLink } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { apiClient } from '@/lib/api/client';
 
 export default function DashboardPage() {
-    // Mock data - will be replaced with real API calls
-    const repos = [
-        {
-            id: '1',
-            name: 'my-react-native-app',
-            fullName: 'username/my-react-native-app',
-            lastBuild: {
-                status: 'SUCCESS',
-                time: '5 minutes ago',
-                commit: 'abc123f',
-            },
-            shellCached: true,
-        },
-        {
-            id: '2',
-            name: 'mobile-app-v2',
-            fullName: 'username/mobile-app-v2',
-            lastBuild: {
-                status: 'BUILDING',
-                time: '2 minutes ago',
-                commit: 'def456a',
-            },
-            shellCached: false,
-        },
-    ];
+    const [repos, setRepos] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const fetchRepos = async () => {
+            try {
+                const response = await apiClient.listRepos();
+                setRepos(response.data.repos);
+            } catch (error) {
+                console.error('Failed to fetch repos:', error);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        fetchRepos();
+    }, []);
 
     const getStatusIcon = (status: string) => {
         switch (status) {
@@ -43,6 +37,16 @@ export default function DashboardPage() {
                 return <Clock className="h-5 w-5 text-muted-foreground" />;
         }
     };
+
+    if (loading) {
+        return (
+            <DashboardLayout>
+                <div className="flex items-center justify-center h-64">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                </div>
+            </DashboardLayout>
+        );
+    }
 
     return (
         <DashboardLayout>
@@ -132,14 +136,14 @@ export default function DashboardPage() {
 
                                             <div className="flex items-center gap-4 text-sm">
                                                 <div className="flex items-center gap-2">
-                                                    {getStatusIcon(repo.lastBuild.status)}
+                                                    {getStatusIcon(repo.builds?.[0]?.status)}
                                                     <span className="text-muted-foreground">
-                                                        Last build: {repo.lastBuild.time}
+                                                        Last build: {repo.builds?.[0]?.queuedAt ? new Date(repo.builds[0].queuedAt).toLocaleDateString() : 'Never'}
                                                     </span>
                                                 </div>
                                                 <div className="flex items-center gap-2">
                                                     <span className="font-mono text-xs text-muted-foreground">
-                                                        {repo.lastBuild.commit}
+                                                        {repo.builds?.[0]?.commit?.substring(0, 7) || '-'}
                                                     </span>
                                                 </div>
                                             </div>

@@ -15,7 +15,8 @@ export async function GET(request: NextRequest) {
 
     try {
         // Exchange code for token
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+        // Use 127.0.0.1 for server-to-server communication to avoid IPv6 resolution issues with localhost
+        const apiUrl = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001').replace('localhost', '127.0.0.1');
         const response = await fetch(`${apiUrl}/api/auth/github`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -23,22 +24,17 @@ export async function GET(request: NextRequest) {
         });
 
         if (!response.ok) {
-            throw new Error('Authentication failed');
+            const errorText = await response.text();
+            console.error('Backend auth failed:', response.status, errorText);
+            throw new Error(`Authentication failed: ${response.status} ${errorText}`);
         }
 
         const data = await response.json();
 
-        // Set JWT cookie
-        const redirectResponse = NextResponse.redirect(new URL('/dashboard', request.url));
-        redirectResponse.cookies.set('token', data.token, {
-            httpOnly: true,
-            secure: process.env.NODE_ENV === 'production',
-            sameSite: 'lax',
-            maxAge: 60 * 60 * 24 * 30, // 30 days
-        });
+        // Redirect with token in query param so client can save to localStorage
+        return NextResponse.redirect(new URL(`/dashboard?token=${data.token}`, request.url));
 
-        // Also store in localStorage via client-side redirect
-        return redirectResponse;
+
     } catch (error) {
         console.error('OAuth callback error:', error);
         return NextResponse.redirect(new URL('/login?error=auth_failed', request.url));

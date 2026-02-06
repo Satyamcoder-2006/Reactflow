@@ -25,6 +25,7 @@ export const apiClient = {
 
     // Repositories
     listRepos: () => api.get('/repos'),
+    listGithubRepos: () => api.get('/repos/github'),
     connectRepo: (data: { githubRepoId: string; fullName: string }) =>
         api.post('/repos', data),
     getRepo: (id: string) => api.get(`/repos/${id}`),

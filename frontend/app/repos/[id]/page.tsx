@@ -1,46 +1,86 @@
 'use client';
 
 import { DashboardLayout } from '@/components/layout/DashboardLayout';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { BuildHistory } from '@/components/build/BuildHistory';
 import { GitBranch, Package, Clock, ExternalLink, Play, Trash } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { apiClient } from '@/lib/api/client';
 
 export default function RepoDetailPage() {
     const params = useParams();
+    const router = useRouter();
     const repoId = params.id as string;
+    const [repo, setRepo] = useState<any>(null);
+    const [loading, setLoading] = useState(true);
+    const [triggering, setTriggering] = useState(false);
 
-    // Mock data - will be replaced with API calls
-    const repo = {
-        id: repoId,
-        name: 'my-react-native-app',
-        fullName: 'username/my-react-native-app',
-        defaultBranch: 'main',
-        isPrivate: false,
-        lastBuild: {
-            status: 'SUCCESS',
-            time: '5 minutes ago',
-            commit: 'abc123f',
-        },
-        shell: {
-            cached: true,
-            buildTime: 720,
-            apkSize: 45000000,
-            reactNativeVersion: '0.73.0',
-        },
+    useEffect(() => {
+        const fetchRepo = async () => {
+            try {
+                const response = await apiClient.getRepo(repoId);
+                setRepo(response.data.repo);
+            } catch (error) {
+                console.error('Failed to fetch repo:', error);
+            } finally {
+                setLoading(false);
+            }
+        };
+
+        if (repoId) {
+            fetchRepo();
+        }
+    }, [repoId]);
+
+    const handleTriggerBuild = async () => {
+        setTriggering(true);
+        try {
+            await apiClient.triggerBuild(repoId);
+            // Refresh repo data to show new build
+            const response = await apiClient.getRepo(repoId);
+            setRepo(response.data.repo);
+        } catch (error) {
+            console.error('Failed to trigger build:', error);
+        } finally {
+            setTriggering(false);
+        }
     };
 
-    const builds = [
-        {
-            id: '1',
-            status: 'SUCCESS',
-            buildType: 'SHELL',
-            queuedAt: new Date().toISOString(),
-            buildDuration: 720,
-            commit: 'abc123f',
-            commitMessage: 'Add new feature',
-        },
-    ];
+    const handleDisconnect = async () => {
+        if (!confirm('Are you sure you want to disconnect this repository?')) return;
+
+        try {
+            await apiClient.disconnectRepo(repoId);
+            router.push('/dashboard');
+        } catch (error) {
+            console.error('Failed to disconnect repo:', error);
+        }
+    };
+
+    if (loading) {
+        return (
+            <DashboardLayout>
+                <div className="flex items-center justify-center h-64">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                </div>
+            </DashboardLayout>
+        );
+    }
+
+    if (!repo) {
+        return (
+            <DashboardLayout>
+                <div className="text-center py-12">
+                    <h2 className="text-xl font-semibold mb-2">Repository not found</h2>
+                    <p className="text-muted-foreground">The requested repository does not exist.</p>
+                </div>
+            </DashboardLayout>
+        );
+    }
+
+    const lastBuild = repo.builds?.[0];
+    const currentShell = repo.shells?.find((s: any) => s.isCurrent)?.shell;
 
     return (
         <DashboardLayout>
@@ -63,11 +103,18 @@ export default function RepoDetailPage() {
                         </div>
 
                         <div className="flex items-center gap-2">
-                            <button className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors">
+                            <button
+                                onClick={handleTriggerBuild}
+                                disabled={triggering}
+                                className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
+                            >
                                 <Play className="h-4 w-4" />
-                                Trigger Build
+                                {triggering ? 'Starting...' : 'Trigger Build'}
                             </button>
-                            <button className="flex items-center gap-2 px-4 py-2 border border-border text-destructive rounded-md hover:bg-destructive/10 transition-colors">
+                            <button
+                                onClick={handleDisconnect}
+                                className="flex items-center gap-2 px-4 py-2 border border-border text-destructive rounded-md hover:bg-destructive/10 transition-colors"
+                            >
                                 <Trash className="h-4 w-4" />
                                 Disconnect
                             </button>
@@ -82,7 +129,7 @@ export default function RepoDetailPage() {
                                 <span className="text-sm text-muted-foreground">Shell Status</span>
                             </div>
                             <p className="text-xl font-semibold">
-                                {repo.shell.cached ? '✓ Cached' : '⏳ Building'}
+                                {currentShell ? '✓ Cached' : 'Using Default'}
                             </p>
                         </div>
 
@@ -91,7 +138,9 @@ export default function RepoDetailPage() {
                                 <Clock className="h-4 w-4 text-muted-foreground" />
                                 <span className="text-sm text-muted-foreground">Last Build</span>
                             </div>
-                            <p className="text-xl font-semibold">{Math.floor(repo.shell.buildTime / 60)}m</p>
+                            <p className="text-xl font-semibold">
+                                {lastBuild?.duration ? `${Math.floor(lastBuild.duration / 60)}m` : '-'}
+                            </p>
                         </div>
 
                         <div className="p-4 rounded-lg border border-border bg-card">
@@ -100,7 +149,7 @@ export default function RepoDetailPage() {
                                 <span className="text-sm text-muted-foreground">APK Size</span>
                             </div>
                             <p className="text-xl font-semibold">
-                                {(repo.shell.apkSize / 1024 / 1024).toFixed(1)}MB
+                                {currentShell?.apkSize ? `${(currentShell.apkSize / 1024 / 1024).toFixed(1)}MB` : '-'}
                             </p>
                         </div>
 
@@ -109,7 +158,9 @@ export default function RepoDetailPage() {
                                 <GitBranch className="h-4 w-4 text-muted-foreground" />
                                 <span className="text-sm text-muted-foreground">React Native</span>
                             </div>
-                            <p className="text-xl font-semibold">{repo.shell.reactNativeVersion}</p>
+                            <p className="text-xl font-semibold">
+                                {repo.packageJson?.dependencies?.['react-native'] || '-'}
+                            </p>
                         </div>
                     </div>
                 </div>
@@ -123,7 +174,7 @@ export default function RepoDetailPage() {
                     </TabsList>
 
                     <TabsContent value="builds">
-                        <BuildHistory builds={builds} />
+                        <BuildHistory builds={repo.builds || []} />
                     </TabsContent>
 
                     <TabsContent value="overview">
@@ -136,11 +187,11 @@ export default function RepoDetailPage() {
                                 </div>
                                 <div className="flex justify-between">
                                     <span className="text-muted-foreground">Last Commit</span>
-                                    <span className="font-mono">{repo.lastBuild.commit}</span>
+                                    <span className="font-mono">{lastBuild?.commit?.substring(0, 7) || '-'}</span>
                                 </div>
                                 <div className="flex justify-between">
                                     <span className="text-muted-foreground">Shell Cache</span>
-                                    <span>{repo.shell.cached ? 'Active' : 'None'}</span>
+                                    <span>{currentShell ? 'Active' : 'None'}</span>
                                 </div>
                             </div>
                         </div>
@@ -148,11 +199,14 @@ export default function RepoDetailPage() {
 
                     <TabsContent value="settings">
                         <div className="p-6 rounded-lg border border-border bg-card">
-                            <h3 className="font-semibold mb-4">Danger Zone</h3>
+                            <h3 className="font-semibold text-destructive mb-4">Danger Zone</h3>
                             <p className="text-sm text-muted-foreground mb-4">
                                 Disconnecting this repository will stop all builds and delete webhooks.
                             </p>
-                            <button className="px-4 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 transition-colors">
+                            <button
+                                onClick={handleDisconnect}
+                                className="px-4 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 transition-colors"
+                            >
                                 Disconnect Repository
                             </button>
                         </div>
