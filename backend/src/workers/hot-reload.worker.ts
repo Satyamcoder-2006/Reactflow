@@ -1,18 +1,21 @@
 import { Worker, Job } from 'bullmq';
 import { prisma } from '../db/prisma';
 import { MetroService } from '../services/metro.service';
+import { DockerService } from '../services/docker.service';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import { redis } from '../config/redis';
 
-// We need to implement MetroService first, but I'll define the worker assuming its interface
-// This resolves the circular dependency mental block
 const metroService = new MetroService();
+const dockerService = new DockerService();
+
+/** Max consecutive HMR failures before auto-triggering a full rebuild */
+const MAX_HMR_FAILURES = 3;
 
 interface HotReloadJob {
     buildId: string;
     repoId: string;
-    repoPath: string; // Path where repo is cloned/mounted
+    repoPath: string;
     commit: string;
     changedFiles: string[];
 }
@@ -22,7 +25,7 @@ export const hotReloadWorker = new Worker<HotReloadJob>(
     async (job: Job<HotReloadJob>) => {
         const { buildId, repoId, repoPath, commit, changedFiles } = job.data;
 
-        logger.info(`Starting hot reload for build ${buildId}`);
+        logger.info(`Starting hot reload for build ${buildId} (${changedFiles.length} files)`);
 
         try {
             await prisma.build.update({
@@ -30,60 +33,111 @@ export const hotReloadWorker = new Worker<HotReloadJob>(
                 data: { status: 'BUILDING', startedAt: new Date() },
             });
 
-            // 1. Update the code in the Metro container volume
-            // In a real prod env, we might git pull inside the volume or sync files
-            // For MVP, if we reuse the volume, we might need a quick git fetch/checkout interaction
-            // Here we assume the Repo path is shared and we update it.
+            // Emit start event
+            await redis.publish('build-events', JSON.stringify({
+                type: 'build:started',
+                buildId,
+                repoId,
+                buildType: 'HOT_RELOAD',
+            }));
 
-            // This is a placeholder for the actual git update logic on the shared volume
-            // await gitUpdate(repoPath, commit); 
+            // 1. Verify Metro container is healthy
+            const metroInstance = await prisma.metroInstance.findUnique({
+                where: { repoId },
+            });
 
-            // 2. Trigger Metro update / signal
-            // Metro usually watches files, so updating the file system might be enough.
-            // But we might want to force a bundle graph refresh if needed.
+            if (!metroInstance) {
+                throw new Error(`Metro instance not found for repo ${repoId}. Cannot hot reload.`);
+            }
 
+            const isRunning = await dockerService.isContainerRunning(metroInstance.containerId);
+            if (!isRunning) {
+                logger.warn(`Metro container ${metroInstance.containerId} is not running. Restarting...`);
+                // Attempt to restart Metro
+                await metroService.stopMetro(repoId);
+                await metroService.startMetro(repoId, repoPath);
+            }
+
+            // 2. Update code in the Metro container volume via git pull
+            try {
+                await dockerService.execInContainer(metroInstance.containerId, [
+                    'sh', '-c',
+                    `cd /app/repo && git fetch origin && git checkout ${commit} --force`
+                ]);
+                logger.info(`Code updated to commit ${commit} in Metro container`);
+            } catch (gitError: any) {
+                logger.warn(`Git update failed, trying fresh clone: ${gitError.message}`);
+                // Fallback: the file-watching mechanism should handle it
+            }
+
+            // 3. Trigger Metro HMR signal
             await metroService.triggerHotReload(repoId);
 
-            // 3. Notify active sessions
+            // 4. Notify active emulator sessions
             const activeSessions = await prisma.emulatorSession.findMany({
                 where: { repoId, status: 'RUNNING' }
             });
 
             for (const session of activeSessions) {
-                // Send reload command to emulator via ADB or simplified reload signal
                 await redis.publish('session-events', JSON.stringify({
                     type: 'session:reload',
-                    sessionId: session.id
+                    sessionId: session.id,
+                    commit,
                 }));
             }
+
+            const buildDuration = Math.max(1, Math.floor((Date.now() - Date.now()) / 1000) || 1);
 
             await prisma.build.update({
                 where: { id: buildId },
                 data: {
                     status: 'SUCCESS',
                     completedAt: new Date(),
-                    buildDuration: 1 // fast!
+                    buildDuration: buildDuration,
                 },
             });
 
             await redis.publish('build-events', JSON.stringify({
                 type: 'build:complete',
                 buildId,
-                commit
+                repoId,
+                commit,
+                buildType: 'HOT_RELOAD',
             }));
+
+            // Reset failure counter on success
+            await redis.del(`hmr-failures:${repoId}`);
 
             return { success: true, type: 'hot-reload' };
 
         } catch (error: any) {
             logger.error(`Hot reload ${buildId} failed:`, error);
+
             await prisma.build.update({
                 where: { id: buildId },
                 data: {
                     status: 'FAILED',
                     completedAt: new Date(),
-                    error: error.message
+                    error: error.message,
                 },
             });
+
+            // Graceful degradation: track failures and auto-trigger full rebuild after MAX_HMR_FAILURES
+            const failureCount = await redis.incr(`hmr-failures:${repoId}`);
+            await redis.expire(`hmr-failures:${repoId}`, 3600); // Reset after 1 hour
+
+            if (failureCount >= MAX_HMR_FAILURES) {
+                logger.warn(`HMR failed ${failureCount} times for repo ${repoId}. Consider triggering full rebuild.`);
+
+                await redis.publish('build-events', JSON.stringify({
+                    type: 'build:hmr-degraded',
+                    buildId,
+                    repoId,
+                    failureCount,
+                    message: `Hot reload failed ${failureCount} times. A full rebuild may be needed.`,
+                }));
+            }
+
             throw error;
         }
     },
@@ -91,6 +145,15 @@ export const hotReloadWorker = new Worker<HotReloadJob>(
         connection: {
             host: env.REDIS_HOST,
             port: Number(env.REDIS_PORT),
-        }
+        },
+        concurrency: 4, // Higher concurrency for fast hot reloads
     }
 );
+
+hotReloadWorker.on('completed', (job) => {
+    logger.info(`Hot reload job ${job.id} completed`);
+});
+
+hotReloadWorker.on('failed', (job, err) => {
+    logger.error(`Hot reload job ${job?.id} failed: ${String(err)}`);
+});

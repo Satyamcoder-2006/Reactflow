@@ -4,9 +4,12 @@ import { DashboardLayout } from '@/components/layout/DashboardLayout';
 import { useParams, useRouter } from 'next/navigation';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { BuildHistory } from '@/components/build/BuildHistory';
-import { GitBranch, Package, Clock, ExternalLink, Play, Trash } from 'lucide-react';
+import { BuildLogs } from '@/components/build/BuildLogs'; // Import BuildLogs
+import { EmulatorViewer } from '@/components/preview/EmulatorViewer'; // Import EmulatorViewer
+import { GitBranch, Package, Clock, Play, Trash, Smartphone, Terminal, RefreshCw } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { apiClient } from '@/lib/api/client';
+import { getSocket } from '@/lib/utils/socket';
 
 export default function RepoDetailPage() {
     const params = useParams();
@@ -15,35 +18,93 @@ export default function RepoDetailPage() {
     const [repo, setRepo] = useState<any>(null);
     const [loading, setLoading] = useState(true);
     const [triggering, setTriggering] = useState(false);
+    const [activeBuildId, setActiveBuildId] = useState<string | null>(null);
+    const [sessionId, setSessionId] = useState<string | null>(null);
+    const [startingSession, setStartingSession] = useState(false);
+
+    const fetchRepo = async () => {
+        try {
+            const response = await apiClient.getRepo(repoId);
+            setRepo(response.data.repo);
+            // Check if there's a running build
+            const runningBuild = response.data.repo.builds?.find(
+                (b: any) => b.status === 'QUEUED' || b.status === 'BUILDING'
+            );
+            if (runningBuild) {
+                setActiveBuildId(runningBuild.id);
+            }
+        } catch (error) {
+            console.error('Failed to fetch repo:', error);
+        } finally {
+            setLoading(false);
+        }
+    };
 
     useEffect(() => {
-        const fetchRepo = async () => {
-            try {
-                const response = await apiClient.getRepo(repoId);
-                setRepo(response.data.repo);
-            } catch (error) {
-                console.error('Failed to fetch repo:', error);
-            } finally {
-                setLoading(false);
-            }
-        };
-
         if (repoId) {
             fetchRepo();
+
+            // Listen for build events to update repo data
+            const socket = getSocket();
+            socket.on('build:started', ({ buildId }) => {
+                setActiveBuildId(buildId);
+                fetchRepo();
+            });
+            socket.on('build:complete', () => {
+                // Keep activeBuildId for a moment to show success state if needed, or clear it
+                // For now, let's clear it so logs hide or move to history
+                // But user might want to see logs. Let's keep it if selected.
+                fetchRepo();
+            });
         }
+        return () => {
+            getSocket().off('build:started');
+            getSocket().off('build:complete');
+        };
     }, [repoId]);
 
     const handleTriggerBuild = async () => {
         setTriggering(true);
         try {
-            await apiClient.triggerBuild(repoId);
-            // Refresh repo data to show new build
-            const response = await apiClient.getRepo(repoId);
-            setRepo(response.data.repo);
+            const res = await apiClient.triggerBuild(repoId);
+            setActiveBuildId(res.data.build.id);
+            fetchRepo();
         } catch (error) {
             console.error('Failed to trigger build:', error);
         } finally {
             setTriggering(false);
+        }
+    };
+
+    const handleStartSession = async () => {
+        if (!repo.shells?.some((s: any) => s.isCurrent)) {
+            alert('No shell APK available. Please build the project first.');
+            return;
+        }
+
+        setStartingSession(true);
+        try {
+            const currentShell = repo.shells.find((s: any) => s.isCurrent);
+            const res = await apiClient.createSession({
+                repoId,
+                shellId: currentShell.shellId,
+            });
+            setSessionId(res.data.session.id);
+        } catch (error) {
+            console.error('Failed to start session:', error);
+            alert('Failed to start emulator session');
+        } finally {
+            setStartingSession(false);
+        }
+    };
+
+    const handleStopSession = async () => {
+        if (!sessionId) return;
+        try {
+            await apiClient.stopSession(sessionId);
+            setSessionId(null);
+        } catch (error) {
+            console.error('Failed to stop session:', error);
         }
     };
 
@@ -84,52 +145,87 @@ export default function RepoDetailPage() {
 
     return (
         <DashboardLayout>
-            <div className="max-w-6xl">
+            <div className="max-w-6xl mx-auto">
                 {/* Header */}
                 <div className="mb-8">
-                    <div className="flex items-start justify-between mb-4">
+                    <div className="flex flex-col md:flex-row md:items-start justify-between gap-4 mb-6">
                         <div>
-                            <h1 className="text-3xl font-bold mb-2">{repo.name}</h1>
-                            <div className="flex items-center gap-3 text-muted-foreground">
+                            <h1 className="text-3xl font-bold mb-2 flex items-center gap-2">
+                                {repo.name}
+                                {sessionId && (
+                                    <span className="px-2 py-0.5 text-xs bg-green-500/10 text-green-500 rounded-full border border-green-500/20">
+                                        Session Active
+                                    </span>
+                                )}
+                            </h1>
+                            <div className="flex flex-wrap items-center gap-3 text-muted-foreground text-sm">
                                 <span>{repo.fullName}</span>
                                 <span>•</span>
-                                <span>{repo.isPrivate ? '🔒 Private' : '🌍 Public'}</span>
-                                <span>•</span>
                                 <div className="flex items-center gap-1">
-                                    <GitBranch className="h-4 w-4" />
+                                    <GitBranch className="h-3 w-3" />
                                     <span>{repo.defaultBranch}</span>
                                 </div>
+                                <span>•</span>
+                                <span>{repo.isPrivate ? '🔒 Private' : '🌍 Public'}</span>
                             </div>
                         </div>
 
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                            {sessionId ? (
+                                <button
+                                    onClick={handleStopSession}
+                                    className="flex items-center gap-2 px-4 py-2 bg-destructive/10 text-destructive border border-destructive/20 rounded-md hover:bg-destructive/20 transition-colors"
+                                >
+                                    <Smartphone className="h-4 w-4" />
+                                    Stop Session
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={handleStartSession}
+                                    disabled={startingSession || !currentShell}
+                                    className="flex items-center gap-2 px-4 py-2 bg-secondary text-secondary-foreground border border-border rounded-md hover:bg-secondary/80 transition-colors disabled:opacity-50"
+                                >
+                                    <Smartphone className="h-4 w-4" />
+                                    {startingSession ? 'Starting...' : 'Preview App'}
+                                </button>
+                            )}
+
                             <button
                                 onClick={handleTriggerBuild}
                                 disabled={triggering}
                                 className="flex items-center gap-2 px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
                             >
                                 <Play className="h-4 w-4" />
-                                {triggering ? 'Starting...' : 'Trigger Build'}
+                                {triggering ? 'Queuing...' : 'Build Shell'}
                             </button>
+
+                            <button
+                                onClick={() => fetchRepo()}
+                                className="p-2 border border-border rounded-md hover:bg-secondary transition-colors"
+                                title="Refresh"
+                            >
+                                <RefreshCw className="h-4 w-4" />
+                            </button>
+
                             <button
                                 onClick={handleDisconnect}
-                                className="flex items-center gap-2 px-4 py-2 border border-border text-destructive rounded-md hover:bg-destructive/10 transition-colors"
+                                className="p-2 text-destructive hover:bg-destructive/10 rounded-md transition-colors"
+                                title="Disconnect Repository"
                             >
                                 <Trash className="h-4 w-4" />
-                                Disconnect
                             </button>
                         </div>
                     </div>
 
                     {/* Stats Cards */}
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         <div className="p-4 rounded-lg border border-border bg-card">
                             <div className="flex items-center gap-2 mb-1">
                                 <Package className="h-4 w-4 text-muted-foreground" />
                                 <span className="text-sm text-muted-foreground">Shell Status</span>
                             </div>
                             <p className="text-xl font-semibold">
-                                {currentShell ? '✓ Cached' : 'Using Default'}
+                                {currentShell ? '✓ Cached' : 'No Shell'}
                             </p>
                         </div>
 
@@ -139,7 +235,7 @@ export default function RepoDetailPage() {
                                 <span className="text-sm text-muted-foreground">Last Build</span>
                             </div>
                             <p className="text-xl font-semibold">
-                                {lastBuild?.duration ? `${Math.floor(lastBuild.duration / 60)}m` : '-'}
+                                {lastBuild?.buildDuration ? `${Math.ceil(lastBuild.buildDuration)}s` : '-'}
                             </p>
                         </div>
 
@@ -156,7 +252,7 @@ export default function RepoDetailPage() {
                         <div className="p-4 rounded-lg border border-border bg-card">
                             <div className="flex items-center gap-2 mb-1">
                                 <GitBranch className="h-4 w-4 text-muted-foreground" />
-                                <span className="text-sm text-muted-foreground">React Native</span>
+                                <span className="text-sm text-muted-foreground">RN Version</span>
                             </div>
                             <p className="text-xl font-semibold">
                                 {repo.packageJson?.dependencies?.['react-native'] || '-'}
@@ -165,53 +261,151 @@ export default function RepoDetailPage() {
                     </div>
                 </div>
 
-                {/* Tabs */}
-                <Tabs defaultValue="builds" className="w-full">
-                    <TabsList className="mb-6">
-                        <TabsTrigger value="builds">Builds</TabsTrigger>
-                        <TabsTrigger value="overview">Overview</TabsTrigger>
-                        <TabsTrigger value="settings">Settings</TabsTrigger>
-                    </TabsList>
-
-                    <TabsContent value="builds">
-                        <BuildHistory builds={repo.builds || []} />
-                    </TabsContent>
-
-                    <TabsContent value="overview">
-                        <div className="p-6 rounded-lg border border-border bg-card">
-                            <h3 className="font-semibold mb-4">Repository Information</h3>
-                            <div className="space-y-3 text-sm">
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Default Branch</span>
-                                    <span className="font-mono">{repo.defaultBranch}</span>
+                {/* Main Content */}
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {/* Left Column: Build Info / Logs / Tabs */}
+                    <div className="lg:col-span-2 space-y-6">
+                        {/* Active Build Logs (if any) */}
+                        {activeBuildId && (
+                            <div className="border border-border rounded-lg overflow-hidden">
+                                <div className="bg-secondary/50 px-4 py-3 border-b border-border flex justify-between items-center">
+                                    <div className="flex items-center gap-2">
+                                        <Terminal className="h-4 w-4 text-primary" />
+                                        <span className="font-medium text-sm">Build Progress</span>
+                                    </div>
+                                    <button
+                                        onClick={() => setActiveBuildId(null)}
+                                        className="text-xs text-muted-foreground hover:text-primary"
+                                    >
+                                        Hide
+                                    </button>
                                 </div>
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Last Commit</span>
-                                    <span className="font-mono">{lastBuild?.commit?.substring(0, 7) || '-'}</span>
+                                <BuildLogs buildId={activeBuildId} />
+                            </div>
+                        )}
+
+                        <Tabs defaultValue={sessionId ? "preview" : "builds"} className="w-full">
+                            <TabsList className="mb-4">
+                                <TabsTrigger value="builds">Build History</TabsTrigger>
+                                <TabsTrigger value="preview" disabled={!sessionId && !currentShell}>
+                                    App Preview
+                                </TabsTrigger>
+                                <TabsTrigger value="overview">Overview</TabsTrigger>
+                                <TabsTrigger value="settings">Settings</TabsTrigger>
+                            </TabsList>
+
+                            <TabsContent value="builds">
+                                <BuildHistory builds={repo.builds || []} />
+                            </TabsContent>
+
+                            <TabsContent value="preview">
+                                {sessionId ? (
+                                    <div className="flex justify-center bg-black/5 rounded-lg border border-border p-8">
+                                        <EmulatorViewer sessionId={sessionId} />
+                                    </div>
+                                ) : (
+                                    <div className="text-center py-12 border border-border border-dashed rounded-lg">
+                                        <Smartphone className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+                                        <h3 className="text-lg font-medium mb-1">No Active Session</h3>
+                                        <p className="text-sm text-muted-foreground mb-4">
+                                            Start a session to preview your app and test hot reloading.
+                                        </p>
+                                        <button
+                                            onClick={handleStartSession}
+                                            disabled={startingSession || !currentShell}
+                                            className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
+                                        >
+                                            {startingSession ? 'Starting...' : 'Launch Preview'}
+                                        </button>
+                                    </div>
+                                )}
+                            </TabsContent>
+
+                            <TabsContent value="overview">
+                                <div className="p-6 rounded-lg border border-border bg-card">
+                                    <h3 className="font-semibold mb-4">Repository Details</h3>
+                                    <div className="space-y-3 text-sm">
+                                        <div className="flex justify-between py-2 border-b border-border/50">
+                                            <span className="text-muted-foreground">Default Branch</span>
+                                            <span className="font-mono">{repo.defaultBranch}</span>
+                                        </div>
+                                        <div className="flex justify-between py-2 border-b border-border/50">
+                                            <span className="text-muted-foreground">Last Commit</span>
+                                            <span className="font-mono">{lastBuild?.commit?.substring(0, 7) || '-'}</span>
+                                        </div>
+                                        <div className="flex justify-between py-2 border-b border-border/50">
+                                            <span className="text-muted-foreground">Shell Cache</span>
+                                            <span>{currentShell ? 'Active' : 'None'}</span>
+                                        </div>
+                                        <div className="flex justify-between py-2 border-b border-border/50">
+                                            <span className="text-muted-foreground">Created At</span>
+                                            <span>{new Date(repo.createdAt).toLocaleDateString()}</span>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="flex justify-between">
-                                    <span className="text-muted-foreground">Shell Cache</span>
-                                    <span>{currentShell ? 'Active' : 'None'}</span>
+                            </TabsContent>
+
+                            <TabsContent value="settings">
+                                <div className="p-6 rounded-lg border border-border bg-card">
+                                    <h3 className="font-semibold text-destructive mb-4">Danger Zone</h3>
+                                    <p className="text-sm text-muted-foreground mb-4">
+                                        Disconnecting this repository will stop all builds, delete webhooks, and remove all associated data.
+                                    </p>
+                                    <button
+                                        onClick={handleDisconnect}
+                                        className="px-4 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 transition-colors"
+                                    >
+                                        Disconnect Repository
+                                    </button>
+                                </div>
+                            </TabsContent>
+                        </Tabs>
+                    </div>
+
+                    {/* Right Column: Active Session / Quick Actions */}
+                    <div className="space-y-6">
+                        {sessionId && (
+                            <div className="rounded-lg border border-border bg-card p-4">
+                                <h3 className="font-medium mb-2 flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+                                    Active Session
+                                </h3>
+                                <p className="text-xs text-muted-foreground mb-4">
+                                    Session ID: {sessionId.substring(0, 8)}...
+                                </p>
+                                <div className="space-y-2">
+                                    <button
+                                        onClick={handleStopSession}
+                                        className="w-full px-3 py-2 text-sm bg-secondary hover:bg-secondary/80 rounded-md transition-colors"
+                                    >
+                                        Stop Session
+                                    </button>
                                 </div>
                             </div>
-                        </div>
-                    </TabsContent>
+                        )}
 
-                    <TabsContent value="settings">
-                        <div className="p-6 rounded-lg border border-border bg-card">
-                            <h3 className="font-semibold text-destructive mb-4">Danger Zone</h3>
-                            <p className="text-sm text-muted-foreground mb-4">
-                                Disconnecting this repository will stop all builds and delete webhooks.
-                            </p>
-                            <button
-                                onClick={handleDisconnect}
-                                className="px-4 py-2 bg-destructive text-destructive-foreground rounded-md hover:bg-destructive/90 transition-colors"
-                            >
-                                Disconnect Repository
-                            </button>
+                        <div className="rounded-lg border border-border bg-card p-4">
+                            <h3 className="font-medium mb-3">Quick Actions</h3>
+                            <div className="space-y-2">
+                                <button
+                                    onClick={handleTriggerBuild}
+                                    disabled={triggering}
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-md hover:bg-secondary transition-colors disabled:opacity-50"
+                                >
+                                    <Play className="h-3 w-3" />
+                                    Trigger Shell Build
+                                </button>
+                                <button
+                                    disabled
+                                    className="w-full flex items-center gap-2 px-3 py-2 text-sm border border-border rounded-md hover:bg-secondary transition-colors opacity-50 cursor-not-allowed"
+                                >
+                                    <Terminal className="h-3 w-3" />
+                                    View Metro Logs
+                                </button>
+                            </div>
                         </div>
-                    </TabsContent>
-                </Tabs>
+                    </div>
+                </div>
             </div>
         </DashboardLayout>
     );

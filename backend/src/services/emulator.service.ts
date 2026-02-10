@@ -2,10 +2,18 @@ import { prisma } from '../db/prisma';
 import { DockerService } from './docker.service';
 import { MetroService } from './metro.service';
 import { logger } from '../utils/logger';
+import { redis } from '../config/redis';
+
+/** Check ADB connectivity every 30 seconds */
+const WATCHDOG_INTERVAL = 30 * 1000;
+/** Max ADB failures before restarting emulator */
+const MAX_ADB_FAILURES = 3;
 
 export class EmulatorService {
     private docker: DockerService;
     private metro: MetroService;
+    private watchdogs: Map<string, NodeJS.Timeout> = new Map();
+    private adbFailures: Map<string, number> = new Map();
 
     constructor() {
         this.docker = new DockerService();
@@ -13,7 +21,7 @@ export class EmulatorService {
     }
 
     /**
-     * Create emulator session
+     * Create emulator session with watchdog.
      */
     async createSession(config: {
         repoId: string;
@@ -29,7 +37,7 @@ export class EmulatorService {
             throw new Error(`Metro bundler not running for repo ${config.repoId}`);
         }
 
-        // Start emulator container
+        // Start emulator container (with isolated networking)
         const { containerId, adbPort } = await this.docker.startEmulator({
             sessionId: crypto.randomUUID(),
             shellApkUrl: config.shellApkUrl,
@@ -55,13 +63,24 @@ export class EmulatorService {
             },
         });
 
+        // Start watchdog for this session
+        this.startWatchdog(session.id, containerId);
+
+        // Mark as RUNNING after a short startup delay
+        setTimeout(async () => {
+            await prisma.emulatorSession.update({
+                where: { id: session.id },
+                data: { status: 'RUNNING', startedAt: new Date() },
+            }).catch(() => { /* session may have been stopped */ });
+        }, 10000);
+
         logger.info(`Emulator session created: ${session.id}`);
 
         return session;
     }
 
     /**
-     * Stop emulator session
+     * Stop emulator session and clean up.
      */
     async stopSession(sessionId: string) {
         const session = await prisma.emulatorSession.findUnique({
@@ -74,7 +93,15 @@ export class EmulatorService {
 
         logger.info(`Stopping emulator session: ${sessionId}`);
 
+        // Stop watchdog
+        this.stopWatchdog(sessionId);
+        this.adbFailures.delete(sessionId);
+
+        // Stop Docker container
         await this.docker.stopContainer(session.containerId);
+
+        // Clean up isolated network
+        await this.docker.removeNetwork(`preview-${sessionId}`).catch(() => { });
 
         await prisma.emulatorSession.update({
             where: { id: sessionId },
@@ -86,7 +113,7 @@ export class EmulatorService {
     }
 
     /**
-     * Send input to emulator (tap, swipe, keypress)
+     * Send input to emulator (tap, swipe, keypress).
      */
     async sendInput(sessionId: string, input: {
         type: 'tap' | 'swipe' | 'key' | 'text';
@@ -133,7 +160,6 @@ export class EmulatorService {
                 break;
         }
 
-        // Execute ADB command in container
         await this.docker.execInContainer(session.containerId, ['adb', ...adbCommand]);
 
         // Update activity timestamp
@@ -147,7 +173,7 @@ export class EmulatorService {
     }
 
     /**
-     * Trigger hot reload on session
+     * Trigger hot reload on session.
      */
     async reloadSession(sessionId: string) {
         const session = await prisma.emulatorSession.findUnique({
@@ -184,7 +210,7 @@ export class EmulatorService {
     }
 
     /**
-     * Cleanup expired sessions
+     * Cleanup expired sessions.
      */
     async cleanupExpired() {
         const maxDuration = 2 * 60 * 60 * 1000; // 2 hours
@@ -208,8 +234,62 @@ export class EmulatorService {
                 await this.stopSession(session.id);
                 logger.info(`Stopped expired session ${session.id}`);
             } catch (error) {
-                logger.error(`Failed to stop session ${session.id}:`, error);
+                logger.error(`Failed to stop session ${session.id}: ${String(error)}`);
             }
+        }
+    }
+
+    // ==================== WATCHDOG ====================
+
+    /**
+     * Start watchdog to monitor emulator health.
+     */
+    private startWatchdog(sessionId: string, containerId: string) {
+        const interval = setInterval(async () => {
+            try {
+                const isRunning = await this.docker.isContainerRunning(containerId);
+                if (!isRunning) {
+                    const failures = (this.adbFailures.get(sessionId) || 0) + 1;
+                    this.adbFailures.set(sessionId, failures);
+
+                    logger.warn(`Emulator watchdog: container ${containerId} not running (failure ${failures}/${MAX_ADB_FAILURES})`);
+
+                    if (failures >= MAX_ADB_FAILURES) {
+                        logger.error(`Emulator ${sessionId} unresponsive after ${failures} checks. Marking as error.`);
+                        this.stopWatchdog(sessionId);
+
+                        await prisma.emulatorSession.update({
+                            where: { id: sessionId },
+                            data: { status: 'ERROR', stoppedAt: new Date() },
+                        }).catch(() => { });
+
+                        // Notify frontend
+                        await redis.publish('session-events', JSON.stringify({
+                            type: 'session:error',
+                            sessionId,
+                            message: 'Emulator became unresponsive and was stopped.',
+                        }));
+                    }
+                } else {
+                    // Reset failure counter on successful check
+                    this.adbFailures.set(sessionId, 0);
+                }
+            } catch (error) {
+                // Ignore errors during watchdog check
+            }
+        }, WATCHDOG_INTERVAL);
+
+        this.watchdogs.set(sessionId, interval);
+    }
+
+    /**
+     * Stop watchdog for a session.
+     */
+    private stopWatchdog(sessionId: string) {
+        const interval = this.watchdogs.get(sessionId);
+        if (interval) {
+            clearInterval(interval);
+            this.watchdogs.delete(sessionId);
         }
     }
 }

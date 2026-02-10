@@ -13,7 +13,7 @@ export class DockerService extends EventEmitter {
     }
 
     /**
-     * Build shell APK in Docker container
+     * Build shell APK in Docker container with persistent cache volumes.
      */
     async buildShellAPK(config: {
         repoUrl: string;
@@ -36,9 +36,10 @@ export class DockerService extends EventEmitter {
                 `BACKEND_URL=${env.BACKEND_URL}`,
             ],
             HostConfig: {
-                Memory: 4 * 1024 * 1024 * 1024, // 4GB is enough for most RN builds
+                Memory: 4 * 1024 * 1024 * 1024, // 4GB
                 CpuQuota: 400000, // 4 cores
                 Binds: [
+                    // Persistent Gradle cache across builds (per-repo isolation available)
                     `${env.GRADLE_CACHE_PATH}:/cache/gradle`,
                     `${env.NPM_CACHE_PATH}:/root/.npm`,
                     // Mount uploads directory so container can save APK directly
@@ -70,7 +71,7 @@ export class DockerService extends EventEmitter {
         // Get APK URL
         const apkUrl = `${env.BACKEND_URL}/storage/shells/${config.commit}/app-debug.apk`;
 
-        // Cleanup
+        // Cleanup container
         logger.info(`Removing build container: ${containerName}`);
         await container.remove();
 
@@ -82,7 +83,7 @@ export class DockerService extends EventEmitter {
     }
 
     /**
-     * Start Metro bundler container
+     * Start Metro bundler container.
      */
     async startMetro(config: {
         repoId: string;
@@ -105,7 +106,9 @@ export class DockerService extends EventEmitter {
                     '8081/tcp': [{ HostPort: '0' }], // Random port
                     '8082/tcp': [{ HostPort: '0' }],
                 },
-                Binds: [`${config.repoPath}:/app/repo:ro`],
+                Binds: [`${config.repoPath}:/app/repo`], // Writable for git pull
+                Memory: 2 * 1024 * 1024 * 1024, // 2GB limit for Metro
+                CpuQuota: 200000, // 2 cores
             },
         });
 
@@ -125,7 +128,7 @@ export class DockerService extends EventEmitter {
     }
 
     /**
-     * Start Redroid emulator
+     * Start Redroid emulator with isolated networking.
      */
     async startEmulator(config: {
         sessionId: string;
@@ -136,20 +139,40 @@ export class DockerService extends EventEmitter {
 
         logger.info(`Creating emulator container: ${containerName}`);
 
-        const container = await this.docker.createContainer({
+        // Create isolated Docker network for this session
+        let networkId: string | undefined;
+        const networkName = `preview-${config.sessionId}`;
+        try {
+            const network = await this.docker.createNetwork({
+                Name: networkName,
+                Driver: 'bridge',
+                Labels: { sessionId: config.sessionId },
+            });
+            networkId = network.id;
+            logger.info(`Created isolated network: ${networkName}`);
+        } catch (error) {
+            logger.warn(`Failed to create isolated network, using default bridge`);
+        }
+
+        const containerConfig: Docker.ContainerCreateOptions = {
             Image: 'redroid:latest',
             name: containerName,
-            Privileged: true,
             Env: [`METRO_URL=${config.metroUrl}`, `SHELL_APK_URL=${config.shellApkUrl}`],
             ExposedPorts: {
                 '5555/tcp': {}, // ADB
             },
             HostConfig: {
+                Privileged: true,
                 PortBindings: {
                     '5555/tcp': [{ HostPort: '0' }],
                 },
+                Memory: 2 * 1024 * 1024 * 1024, // 2GB limit
+                CpuQuota: 200000, // 2 CPU cores
+                ...(networkId ? { NetworkMode: networkName } : {}),
             },
-        });
+        };
+
+        const container = await this.docker.createContainer(containerConfig);
 
         await container.start();
 
@@ -165,7 +188,7 @@ export class DockerService extends EventEmitter {
     }
 
     /**
-     * Stop and remove container
+     * Stop and remove container.
      */
     async stopContainer(containerId: string) {
         try {
@@ -175,13 +198,19 @@ export class DockerService extends EventEmitter {
             await container.remove();
             logger.info(`Container removed: ${containerId}`);
         } catch (error) {
-            logger.error(`Failed to stop container ${containerId}:`, error);
-            throw error;
+            logger.error(`Failed to stop container ${containerId}: ${String(error)}`);
+            // Try force remove
+            try {
+                const container = this.docker.getContainer(containerId);
+                await container.remove({ force: true });
+            } catch (removeError) {
+                // Container may already be gone
+            }
         }
     }
 
     /**
-     * Execute command in container
+     * Execute command in container.
      */
     async execInContainer(containerId: string, cmd: string[]): Promise<string> {
         const container = this.docker.getContainer(containerId);
@@ -210,7 +239,7 @@ export class DockerService extends EventEmitter {
     }
 
     /**
-     * Check if container is running
+     * Check if container is running.
      */
     async isContainerRunning(containerId: string): Promise<boolean> {
         try {
@@ -223,7 +252,7 @@ export class DockerService extends EventEmitter {
     }
 
     /**
-     * Get container logs
+     * Get container logs.
      */
     async getContainerLogs(containerId: string, tail: number = 100): Promise<string> {
         const container = this.docker.getContainer(containerId);
@@ -235,5 +264,18 @@ export class DockerService extends EventEmitter {
         });
 
         return logs.toString('utf8');
+    }
+
+    /**
+     * Remove Docker network by name.
+     */
+    async removeNetwork(networkName: string) {
+        try {
+            const network = this.docker.getNetwork(networkName);
+            await network.remove();
+            logger.info(`Network removed: ${networkName}`);
+        } catch (error) {
+            logger.warn(`Failed to remove network ${networkName}`);
+        }
     }
 }

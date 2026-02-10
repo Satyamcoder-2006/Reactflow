@@ -1,6 +1,6 @@
-import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { FastifyInstance } from 'fastify';
 import { prisma } from '../db/prisma';
-import { shellBuildQueue, hotReloadQueue } from '../workers/index';
+import { addShellBuildJob } from '../queues/build.queue';
 
 export async function buildRoutes(app: FastifyInstance) {
     // List builds for repository
@@ -28,7 +28,7 @@ export async function buildRoutes(app: FastifyInstance) {
         return { builds };
     });
 
-    // Trigger manual build
+    // Trigger manual build with deduplication
     app.post<{
         Params: { repoId: string };
     }>('/:repoId', async (request, reply) => {
@@ -56,8 +56,8 @@ export async function buildRoutes(app: FastifyInstance) {
             },
         });
 
-        // Queue build job
-        await shellBuildQueue.add('manual-build', {
+        // Queue build job with deduplication
+        await addShellBuildJob({
             buildId: build.id,
             repoId,
             userId,
@@ -130,7 +130,7 @@ export async function buildRoutes(app: FastifyInstance) {
             return reply.code(404).send({ error: 'Build not found' });
         }
 
-        if (build.status === 'BUILDING') {
+        if (build.status === 'BUILDING' || build.status === 'QUEUED') {
             await prisma.build.update({
                 where: { id },
                 data: {

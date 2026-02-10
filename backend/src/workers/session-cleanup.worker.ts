@@ -14,7 +14,7 @@ export const sessionCleanupWorker = new Worker(
             await emulatorService.cleanupExpired();
             return { success: true };
         } catch (error) {
-            logger.error('Session cleanup failed:', error);
+            logger.error(`Session cleanup failed: ${String(error)}`);
             throw error;
         }
     },

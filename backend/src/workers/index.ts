@@ -3,20 +3,19 @@ import { shellBuilderWorker } from './shell-builder.worker';
 import { hotReloadWorker } from './hot-reload.worker';
 import { metroManagerWorker } from './metro-manager.worker';
 import { sessionCleanupWorker } from './session-cleanup.worker';
-import { Queue } from 'bullmq';
+import { metroManagerQueue, sessionCleanupQueue } from '../queues/build.queue';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 
-// Create queues
-const connection = {
-    host: env.REDIS_HOST,
-    port: Number(env.REDIS_PORT),
-};
-
-export const shellBuildQueue = new Queue('shell-build', { connection });
-export const hotReloadQueue = new Queue('hot-reload', { connection });
-export const metroManagerQueue = new Queue('metro-manager', { connection });
-export const sessionCleanupQueue = new Queue('session-cleanup', { connection });
+// Re-export queues from the centralized module for backward compat
+export {
+    shellBuildQueue,
+    hotReloadQueue,
+    metroManagerQueue,
+    sessionCleanupQueue,
+    addShellBuildJob,
+    addHotReloadJob,
+} from '../queues/build.queue';
 
 logger.info('✅ All workers initialized');
 logger.info('Workers running:');

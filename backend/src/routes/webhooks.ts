@@ -1,24 +1,29 @@
-import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
+import { FastifyInstance } from 'fastify';
 import { prisma } from '../db/prisma';
 import { GitHubService } from '../services/github.service';
-import { ChangeDetectionService } from '../services/change-detection.service';
+import { ChangeDetectionService, ChangeType } from '../services/change-detection.service';
 import { ShellService } from '../services/shell.service';
 import { StorageService } from '../services/storage.service';
-import { shellBuildQueue, hotReloadQueue } from '../workers/index';
+import { MetroService } from '../services/metro.service';
+import { addShellBuildJob, addHotReloadJob } from '../queues/build.queue';
 import { decrypt } from '../utils/crypto';
 import { env } from '../config/env';
+import { logger } from '../utils/logger';
 
 export async function webhookRoutes(app: FastifyInstance) {
+    const metroService = new MetroService();
+
     // GitHub webhook handler
     app.post<{
         Headers: { 'x-hub-signature-256': string };
         Body: any;
     }>('/github', async (request, reply) => {
+        const body = request.body as any;
         const signature = request.headers['x-hub-signature-256'];
-        const payload = JSON.stringify(request.body);
+        const payload = JSON.stringify(body);
 
         // Determine repository from payload
-        const repoFullName = request.body.repository?.full_name;
+        const repoFullName = body.repository?.full_name;
         if (!repoFullName) {
             return reply.code(400).send({ error: 'Invalid payload' });
         }
@@ -42,12 +47,12 @@ export async function webhookRoutes(app: FastifyInstance) {
         }
 
         // Handle push event
-        if (request.body.ref && request.body.after) {
-            const branch = request.body.ref.replace('refs/heads/', '');
-            const afterCommit = request.body.after;
-            const beforeCommit = request.body.before;
-            const commitMessage = request.body.head_commit?.message;
-            const commitAuthor = request.body.head_commit?.author?.name;
+        if (body.ref && body.after) {
+            const branch = body.ref.replace('refs/heads/', '');
+            const afterCommit = body.after;
+            const beforeCommit = body.before;
+            const commitMessage = body.head_commit?.message;
+            const commitAuthor = body.head_commit?.author?.name;
 
             // Initialize services
             const github = new GitHubService(repo.user.githubToken);
@@ -55,7 +60,7 @@ export async function webhookRoutes(app: FastifyInstance) {
             const storageService = new StorageService();
             const shellService = new ShellService(storageService);
 
-            // Analyze changes
+            // Analyze changes with expanded types
             const analysis = await changeDetection.analyzeChanges(
                 repo.id,
                 repo.owner,
@@ -64,67 +69,113 @@ export async function webhookRoutes(app: FastifyInstance) {
                 afterCommit
             );
 
-            if (analysis.actionTaken === 'SHELL_REBUILD') {
-                // Full native rebuild required
-                const packageJson = await github.getPackageJson(repo.owner, repo.name, afterCommit);
+            // Route to appropriate queue based on change type
+            switch (analysis.actionTaken) {
+                case ChangeType.NATIVE_REBUILD:
+                case ChangeType.DEPENDENCY_UPDATE: {
+                    // Full native rebuild required
+                    const packageJson = await github.getPackageJson(repo.owner, repo.name, afterCommit);
 
-                if (packageJson) {
-                    const { shell, cached, dependencyHash } = await shellService.getOrCreateShell(
-                        repo.id,
-                        packageJson
-                    );
+                    if (packageJson) {
+                        const { shell, cached, dependencyHash } = await shellService.getOrCreateShell(
+                            repo.id,
+                            packageJson
+                        );
 
-                    if (!cached) {
-                        // Queue shell build
-                        const build = await prisma.build.create({
-                            data: {
+                        if (!cached) {
+                            const build = await prisma.build.create({
+                                data: {
+                                    repoId: repo.id,
+                                    userId: repo.userId,
+                                    branch,
+                                    commit: afterCommit,
+                                    commitMessage,
+                                    commitAuthor,
+                                    buildType: 'SHELL',
+                                    triggerType: 'WEBHOOK',
+                                    status: 'QUEUED',
+                                },
+                            });
+
+                            // Use deduplication queue
+                            await addShellBuildJob({
+                                buildId: build.id,
                                 repoId: repo.id,
                                 userId: repo.userId,
+                                repoUrl: `https://github.com/${repo.fullName}`,
                                 branch,
                                 commit: afterCommit,
-                                commitMessage,
-                                commitAuthor,
-                                buildType: 'SHELL',
-                                triggerType: 'WEBHOOK',
-                                status: 'QUEUED',
-                            },
-                        });
+                                packageJson,
+                                dependencyHash: dependencyHash!,
+                            });
 
-                        await shellBuildQueue.add('webhook-build', {
-                            buildId: build.id,
+                            logger.info(`Queued shell build ${build.id} for ${repo.fullName}`);
+                        }
+                    }
+                    break;
+                }
+
+                case ChangeType.METRO_RESTART: {
+                    // Restart Metro and then hot reload
+                    logger.info(`Metro config changed, restarting Metro for ${repo.fullName}`);
+                    await metroService.restartMetro(repo.id, `/repos/${repo.fullName}`);
+
+                    // Queue hot reload after restart
+                    const build = await prisma.build.create({
+                        data: {
                             repoId: repo.id,
                             userId: repo.userId,
-                            repoUrl: `https://github.com/${repo.fullName}`,
                             branch,
                             commit: afterCommit,
-                            packageJson,
-                            dependencyHash: dependencyHash!,
-                        });
-                    }
-                }
-            } else if (analysis.actionTaken === 'HOT_RELOAD') {
-                // JS-only changes - hot reload
-                const build = await prisma.build.create({
-                    data: {
-                        repoId: repo.id,
-                        userId: repo.userId,
-                        branch,
-                        commit: afterCommit,
-                        commitMessage,
-                        commitAuthor,
-                        buildType: 'HOT_RELOAD',
-                        triggerType: 'WEBHOOK',
-                        status: 'QUEUED',
-                    },
-                });
+                            commitMessage,
+                            commitAuthor,
+                            buildType: 'HOT_RELOAD',
+                            triggerType: 'WEBHOOK',
+                            status: 'QUEUED',
+                        },
+                    });
 
-                await hotReloadQueue.add('hot-reload', {
-                    buildId: build.id,
-                    repoId: repo.id,
-                    repoPath: `/repos/${repo.fullName}`,
-                    commit: afterCommit,
-                    changedFiles: analysis.changedFiles,
-                });
+                    await addHotReloadJob({
+                        buildId: build.id,
+                        repoId: repo.id,
+                        repoPath: `/repos/${repo.fullName}`,
+                        commit: afterCommit,
+                        changedFiles: analysis.changedFiles,
+                    });
+                    break;
+                }
+
+                case ChangeType.HOT_RELOAD:
+                case ChangeType.ASSET_SYNC: {
+                    // JS-only changes or asset sync → hot reload
+                    const build = await prisma.build.create({
+                        data: {
+                            repoId: repo.id,
+                            userId: repo.userId,
+                            branch,
+                            commit: afterCommit,
+                            commitMessage,
+                            commitAuthor,
+                            buildType: 'HOT_RELOAD',
+                            triggerType: 'WEBHOOK',
+                            status: 'QUEUED',
+                        },
+                    });
+
+                    await addHotReloadJob({
+                        buildId: build.id,
+                        repoId: repo.id,
+                        repoPath: `/repos/${repo.fullName}`,
+                        commit: afterCommit,
+                        changedFiles: analysis.changedFiles,
+                    });
+                    break;
+                }
+
+                case ChangeType.NO_ACTION:
+                default:
+                    logger.info(`No action needed for push to ${repo.fullName}`);
+                    break;
             }
 
             return { success: true, action: analysis.actionTaken };

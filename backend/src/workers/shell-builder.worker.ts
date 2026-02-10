@@ -22,6 +22,9 @@ interface ShellBuildJob {
     dependencyHash: string;
 }
 
+/** Maximum number of consecutive failures before we stop retrying */
+const MAX_CONSECUTIVE_FAILURES = 3;
+
 export const shellBuilderWorker = new Worker<ShellBuildJob>(
     'shell-build',
     async (job: Job<ShellBuildJob>) => {
@@ -40,33 +43,52 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
             await redis.publish('build-events', JSON.stringify({
                 type: 'build:started',
                 buildId,
+                repoId,
                 timestamp: new Date().toISOString()
             }));
 
-            // Listen to Docker logs
+            // Listen to Docker logs for real-time streaming
+            const logBuffer: string[] = [];
+            const BATCH_SIZE = 10;
+            let batchTimeout: NodeJS.Timeout | null = null;
+
+            const flushLogs = async () => {
+                if (logBuffer.length === 0) return;
+                const batch = logBuffer.splice(0, logBuffer.length);
+                // Batch insert logs for better DB performance
+                await prisma.buildLog.createMany({
+                    data: batch.map(message => ({
+                        buildId,
+                        message: message.trim(),
+                        level: 'INFO',
+                    })),
+                }).catch(err => logger.error('Failed to save build logs batch', err));
+
+                // Emit last line to frontend
+                await redis.publish('build-events', JSON.stringify({
+                    type: 'build:log',
+                    buildId,
+                    message: batch[batch.length - 1]?.trim(),
+                }));
+            };
+
             const logListener = ({ buildId: logBuildId, message }: { buildId: string, message: string }) => {
                 if (logBuildId === buildId) {
-                    // Save log to database (batching recommended in prod, direct for MVP)
-                    prisma.buildLog.create({
-                        data: {
-                            buildId,
-                            message: message.trim(),
-                            level: 'INFO'
-                        },
-                    }).catch(err => logger.error('Failed to save build log', err));
-
-                    // Emit to frontend
-                    redis.publish('build-events', JSON.stringify({
-                        type: 'build:log',
-                        buildId,
-                        message: message.trim()
-                    }));
+                    logBuffer.push(message);
+                    if (logBuffer.length >= BATCH_SIZE) {
+                        flushLogs();
+                    } else if (!batchTimeout) {
+                        batchTimeout = setTimeout(() => {
+                            batchTimeout = null;
+                            flushLogs();
+                        }, 2000);
+                    }
                 }
             };
 
             dockerService.on('log', logListener);
 
-            // Start build
+            // Start build with persistent cache volumes
             const startTime = Date.now();
 
             const apkUrl = await dockerService.buildShellAPK({
@@ -78,10 +100,14 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
 
             const buildTime = Math.floor((Date.now() - startTime) / 1000);
 
+            // Flush remaining logs
+            if (batchTimeout) clearTimeout(batchTimeout);
+            await flushLogs();
+
             // Get APK size
             const apkSize = await storageService.getFileSize(apkUrl);
 
-            // Save shell
+            // Save shell with versioned S3 URL
             const shell = await shellService.saveShell(
                 repoId,
                 dependencyHash,
@@ -89,11 +115,10 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
                 {
                     apkSize,
                     buildTime,
-                    reactNativeVersion: packageJson.dependencies['react-native'],
-                    expoVersion: packageJson.dependencies['expo'],
-                    dependencies: packageJson.dependencies,
-                    // Extract gradle/android versions if available
-                    gradleVersion: '8.6', // Default for now, ideally parsed from logs
+                    reactNativeVersion: packageJson?.dependencies?.['react-native'] || 'unknown',
+                    expoVersion: packageJson?.dependencies?.['expo'],
+                    dependencies: packageJson?.dependencies || {},
+                    gradleVersion: '8.6',
                     androidSdkVersion: 34
                 }
             );
@@ -115,6 +140,7 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
             await redis.publish('build-events', JSON.stringify({
                 type: 'build:complete',
                 buildId,
+                repoId,
                 shellId: shell.id,
                 apkUrl,
             }));
@@ -140,6 +166,7 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
             await redis.publish('build-events', JSON.stringify({
                 type: 'build:failed',
                 buildId,
+                repoId,
                 error: error.message,
             }));
 
@@ -151,7 +178,7 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
             host: env.REDIS_HOST || 'localhost',
             port: Number(env.REDIS_PORT) || 6379,
         },
-        concurrency: Number(env.BUILD_CONCURRENCY) || 5, // Limit concurrent builds
+        concurrency: Number(env.BUILD_CONCURRENCY) || 2, // Limit concurrent builds (2 for standard pool)
     }
 );
 
@@ -160,5 +187,5 @@ shellBuilderWorker.on('completed', (job) => {
 });
 
 shellBuilderWorker.on('failed', (job, err) => {
-    logger.error(`Build job ${job?.id} failed:`, err);
+    logger.error(`Build job ${job?.id} failed: ${String(err)}`);
 });

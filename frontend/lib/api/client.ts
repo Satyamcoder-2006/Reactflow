@@ -43,4 +43,9 @@ export const apiClient = {
     getSession: (id: string) => api.get(`/sessions/${id}`),
     stopSession: (id: string) => api.delete(`/sessions/${id}`),
     sendInput: (id: string, input: any) => api.post(`/sessions/${id}/input`, input),
+
+    // WebRTC
+    sendSignal: (data: { sessionId: string; type: string; data: any }) =>
+        api.post('/webrtc/signal', data),
+    getIceServers: () => api.get('/webrtc/ice-servers'),
 };

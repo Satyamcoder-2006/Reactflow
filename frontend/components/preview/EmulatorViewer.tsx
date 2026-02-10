@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from 'react';
 import SimplePeer from 'simple-peer';
-import { getSocket } from '@/lib/utils/socket';
+import { getSocket, subscribeToSession } from '@/lib/utils/socket';
+import { apiClient } from '@/lib/api/client';
 
 interface EmulatorViewerProps {
     sessionId: string;
@@ -17,56 +18,92 @@ export function EmulatorViewer({ sessionId }: EmulatorViewerProps) {
     useEffect(() => {
         const socket = getSocket();
 
-        socket.emit('join', { sessionId });
+        // Join session room via Socket.IO
+        socket.emit('subscribe:session', sessionId);
 
-        // Initialize WebRTC peer
-        const peer = new SimplePeer({
-            initiator: true,
-            trickle: false,
-            config: {
-                iceServers: [
-                    { urls: 'stun:stun.l.google.com:19302' },
-                    { urls: 'stun:stun1.l.google.com:19302' },
-                ],
-            },
-        });
+        const initPeer = async () => {
+            try {
+                // Get ICE servers configuration
+                const { data: { iceServers } } = await apiClient.getIceServers();
 
-        peerRef.current = peer;
+                // Initialize WebRTC peer
+                const peer = new SimplePeer({
+                    initiator: true,
+                    trickle: false,
+                    config: {
+                        iceServers: iceServers || [
+                            { urls: 'stun:stun.l.google.com:19302' },
+                            { urls: 'stun:stun1.l.google.com:19302' },
+                        ],
+                    },
+                });
 
-        // Send offer to emulator
-        peer.on('signal', (signal) => {
-            socket.emit('offer', { sessionId, signal });
-        });
+                peerRef.current = peer;
 
-        // Receive answer from emulator
-        socket.on('answer', (answer) => {
-            peer.signal(answer);
-        });
+                // Send offer to emulator (via backend)
+                peer.on('signal', async (signal) => {
+                    // Cast to any because SimplePeer.SignalData is a union that's hard to narrow
+                    const s = signal as any;
 
-        // Handle ICE candidates
-        socket.on('ice-candidate', (candidate) => {
-            peer.signal(candidate);
-        });
+                    if (s.type === 'offer') {
+                        await apiClient.sendSignal({
+                            sessionId,
+                            type: 'offer',
+                            data: s,
+                        });
+                    } else if (s.candidate) {
+                        await apiClient.sendSignal({
+                            sessionId,
+                            type: 'ice-candidate',
+                            data: s,
+                        });
+                    }
+                });
 
-        // Receive video stream
-        peer.on('stream', (stream) => {
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-                setIsConnected(true);
+                // Receive video stream
+                peer.on('stream', (stream) => {
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = stream;
+                        setIsConnected(true);
+                    }
+                });
+
+                peer.on('error', (err) => {
+                    console.error('WebRTC error:', err);
+                    setError(err.message);
+                });
+
+                peer.on('close', () => {
+                    setIsConnected(false);
+                });
+
+                // Listen for signals from backend
+                socket.on('webrtc:signal', (message: { type: string, data: any, sessionId: string }) => {
+                    if (message.sessionId !== sessionId) return;
+
+                    if (message.type === 'answer') {
+                        peer.signal(message.data);
+                    } else if (message.type === 'ice-candidate') {
+                        peer.signal(message.data);
+                    }
+                });
+
+            } catch (err: any) {
+                console.error('Failed to init peer:', err);
+                setError(err.message);
             }
-        });
+        };
 
-        peer.on('error', (err) => {
-            console.error('WebRTC error:', err);
-            setError(err.message);
-        });
-
-        peer.on('close', () => {
-            setIsConnected(false);
-        });
+        if (sessionId) {
+            initPeer();
+        }
 
         return () => {
-            peer.destroy();
+            if (peerRef.current) {
+                peerRef.current.destroy();
+                peerRef.current = null;
+            }
+            socket.off('webrtc:signal');
         };
     }, [sessionId]);
 
@@ -74,11 +111,15 @@ export function EmulatorViewer({ sessionId }: EmulatorViewerProps) {
         if (!videoRef.current) return;
 
         const rect = videoRef.current.getBoundingClientRect();
-        const x = ((e.clientX - rect.left) / rect.width) * 1080;
-        const y = ((e.clientY - rect.top) / rect.height) * 2400;
+        // Redroid standard resolution is often 720x1280 or similar, scaling needs to match
+        // For now hardcoding but should be dynamic or standard
+        const scaleX = 1080 / rect.width;
+        const scaleY = 2400 / rect.height;
+
+        const x = (e.clientX - rect.left) * scaleX;
+        const y = (e.clientY - rect.top) * scaleY;
 
         // Send tap command
-        const { apiClient } = await import('@/lib/api/client');
         await apiClient.sendInput(sessionId, {
             type: 'tap',
             x: Math.round(x),
@@ -100,7 +141,7 @@ export function EmulatorViewer({ sessionId }: EmulatorViewerProps) {
     return (
         <div className="relative">
             {!isConnected && (
-                <div className="absolute inset-0 flex items-center justify-center bg-secondary rounded-lg border border-border z-10">
+                <div className="absolute inset-0 flex items-center justify-center bg-secondary rounded-lg border border-border z-10 h-[600px]">
                     <div className="text-center">
                         <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
                         <p className="text-muted-foreground">Connecting to emulator...</p>
@@ -113,7 +154,7 @@ export function EmulatorViewer({ sessionId }: EmulatorViewerProps) {
                     autoPlay
                     playsInline
                     onClick={handleClick}
-                    className="w-full rounded-lg shadow-2xl border border-border cursor-crosshair"
+                    className="w-full rounded-lg shadow-2xl border border-border cursor-crosshair bg-black"
                 />
                 {isConnected && (
                     <div className="absolute top-2 right-2 px-2 py-1 bg-green-500/90 text-white text-xs rounded-md">

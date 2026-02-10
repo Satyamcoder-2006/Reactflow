@@ -2,11 +2,23 @@ import { GitHubService } from './github.service';
 import { prisma } from '../db/prisma';
 import { logger } from '../utils/logger';
 
+/**
+ * Expanded change types for more granular decision-making.
+ */
+export enum ChangeType {
+    NATIVE_REBUILD = 'NATIVE_REBUILD',       // Full Gradle build (android/, ios/, etc.)
+    DEPENDENCY_UPDATE = 'DEPENDENCY_UPDATE',  // package.json changes → npm install + possible rebuild
+    METRO_RESTART = 'METRO_RESTART',          // metro.config.js, babel.config.js → restart Metro
+    HOT_RELOAD = 'HOT_RELOAD',               // Pure JS/TS HMR
+    ASSET_SYNC = 'ASSET_SYNC',               // Images, fonts → sync without rebuild
+    NO_ACTION = 'NO_ACTION',                  // No relevant changes
+}
+
 export class ChangeDetectionService {
     constructor(private github: GitHubService) { }
 
     /**
-     * Analyze changes between two commits
+     * Analyze changes between two commits and determine the appropriate action.
      */
     async analyzeChanges(
         repoId: string,
@@ -25,22 +37,40 @@ export class ChangeDetectionService {
 
         // Categorize files
         const nativeFiles = changedFiles.filter((file) => this.isNativeFile(file));
-        const jsFiles = changedFiles.filter((file) => this.isJsFile(file) && !nativeFiles.includes(file));
-        const assetFiles = changedFiles.filter((file) => this.isAssetFile(file) && !nativeFiles.includes(file));
+        const dependencyFiles = changedFiles.filter((file) => this.isDependencyFile(file));
+        const metroConfigFiles = changedFiles.filter((file) => this.isMetroConfigFile(file));
+        const jsFiles = changedFiles.filter(
+            (file) => this.isJsFile(file) && !nativeFiles.includes(file) && !metroConfigFiles.includes(file)
+        );
+        const assetFiles = changedFiles.filter(
+            (file) => this.isAssetFile(file) && !nativeFiles.includes(file)
+        );
 
         const hasNativeChanges = nativeFiles.length > 0;
-        const hasJsChanges = jsFiles.length > 0 || assetFiles.length > 0;
+        const hasDependencyChanges = dependencyFiles.length > 0;
+        const hasMetroConfigChanges = metroConfigFiles.length > 0;
+        const hasJsChanges = jsFiles.length > 0;
+        const hasAssetChanges = assetFiles.length > 0;
 
-        // Determine action
-        let actionTaken: string;
+        // Determine action (priority order: native > dependency > metro config > JS > asset)
+        let actionTaken: ChangeType;
         if (hasNativeChanges) {
-            actionTaken = 'SHELL_REBUILD';
+            actionTaken = ChangeType.NATIVE_REBUILD;
             logger.info(`🔨 Native changes detected → Full rebuild required`);
+        } else if (hasDependencyChanges) {
+            actionTaken = ChangeType.DEPENDENCY_UPDATE;
+            logger.info(`📦 Dependency changes detected → npm install + possible rebuild`);
+        } else if (hasMetroConfigChanges) {
+            actionTaken = ChangeType.METRO_RESTART;
+            logger.info(`⚙️ Metro config changes detected → Restart Metro`);
         } else if (hasJsChanges) {
-            actionTaken = 'HOT_RELOAD';
+            actionTaken = ChangeType.HOT_RELOAD;
             logger.info(`⚡ JS-only changes detected → Hot reload`);
+        } else if (hasAssetChanges) {
+            actionTaken = ChangeType.ASSET_SYNC;
+            logger.info(`🖼️ Asset-only changes detected → Asset sync`);
         } else {
-            actionTaken = 'NO_ACTION';
+            actionTaken = ChangeType.NO_ACTION;
             logger.info(`ℹ️ No relevant changes detected`);
         }
 
@@ -50,12 +80,12 @@ export class ChangeDetectionService {
                 repoId,
                 beforeCommit,
                 afterCommit,
-                hasNativeChanges,
-                hasJsChanges,
-                hasAssetChanges: assetFiles.length > 0,
+                hasNativeChanges: hasNativeChanges || hasDependencyChanges,
+                hasJsChanges: hasJsChanges || hasMetroConfigChanges,
+                hasAssetChanges,
                 changedFiles,
-                nativeFiles,
-                jsFiles,
+                nativeFiles: [...nativeFiles, ...dependencyFiles],
+                jsFiles: [...jsFiles, ...metroConfigFiles],
                 actionTaken,
             },
         });
@@ -64,47 +94,74 @@ export class ChangeDetectionService {
 
         return {
             hasNativeChanges,
+            hasDependencyChanges,
+            hasMetroConfigChanges,
             hasJsChanges,
+            hasAssetChanges,
             actionTaken,
             changedFiles,
             nativeFiles,
+            dependencyFiles,
+            metroConfigFiles,
             jsFiles,
             assetFiles,
         };
     }
 
     /**
-     * Check if file is a native file that requires rebuild
+     * Check if file is a native file that requires full rebuild.
      */
     private isNativeFile(filePath: string): boolean {
         const nativePatterns = [
             /^android\//,
             /^ios\//,
-            /^package\.json$/,
-            /^package-lock\.json$/,
-            /^yarn\.lock$/,
-            /^pnpm-lock\.yaml$/,
-            /^app\.json$/,
-            /^app\.config\.(js|ts)$/,
-            /^metro\.config\.js$/,
-            /^babel\.config\.js$/,
             /\.gradle$/,
             /\.pbxproj$/,
             /Podfile$/,
+            /^app\.json$/,
+            /^app\.config\.(js|ts)$/,
+            /android\/gradle\.properties$/,
         ];
 
         return nativePatterns.some((pattern) => pattern.test(filePath));
     }
 
     /**
-     * Check if file is a JavaScript file
+     * Check if file is a dependency file (may need rebuild).
+     */
+    private isDependencyFile(filePath: string): boolean {
+        const depPatterns = [
+            /^package\.json$/,
+            /^package-lock\.json$/,
+            /^yarn\.lock$/,
+            /^pnpm-lock\.yaml$/,
+        ];
+
+        return depPatterns.some((pattern) => pattern.test(filePath));
+    }
+
+    /**
+     * Check if file is a Metro/Babel config (needs Metro restart).
+     */
+    private isMetroConfigFile(filePath: string): boolean {
+        const metroPatterns = [
+            /^metro\.config\.(js|ts)$/,
+            /^babel\.config\.(js|ts)$/,
+            /^\.babelrc$/,
+        ];
+
+        return metroPatterns.some((pattern) => pattern.test(filePath));
+    }
+
+    /**
+     * Check if file is a JavaScript/TypeScript file (hot reload).
      */
     private isJsFile(filePath: string): boolean {
         return /\.(js|jsx|ts|tsx)$/.test(filePath);
     }
 
     /**
-     * Check if file is an asset file
+     * Check if file is an asset file (sync without rebuild).
      */
     private isAssetFile(filePath: string): boolean {
         return /\.(png|jpg|jpeg|gif|svg|webp|ttf|otf|mp4|mp3|wav|json)$/.test(filePath);
