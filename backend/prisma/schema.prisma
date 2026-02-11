@@ -58,6 +58,7 @@ model Repo {
   name            String
   defaultBranch   String    @default("main")
   isPrivate       Boolean   @default(false)
+  framework       ProjectFramework @default(REACT_NATIVE)
   
   // Webhook
   webhookId       String?
@@ -81,6 +82,11 @@ model Repo {
   @@index([userId])
   @@index([githubRepoId])
   @@index([fullName])
+}
+
+enum ProjectFramework {
+  REACT_NATIVE
+  EXPO
 }
 
 // ==================== SHELL APK ====================

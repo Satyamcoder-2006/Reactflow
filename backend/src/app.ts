@@ -3,10 +3,12 @@ import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
 import websocket from '@fastify/websocket';
 import { Server } from 'socket.io';
+import Redis from 'ioredis';
+import path from 'path';
 import { env } from './config/env';
 import { logger } from './utils/logger';
 
-export async function buildApp(): Promise<FastifyInstance> {
+export async function buildApp(): Promise<any> {
     const app = Fastify({
         logger: logger,
         requestIdHeader: 'x-request-id',
@@ -21,12 +23,14 @@ export async function buildApp(): Promise<FastifyInstance> {
 
     await app.register(jwt, {
         secret: env.JWT_SECRET,
+        sign: {
+            expiresIn: '7d',
+        },
     });
 
     await app.register(websocket);
 
     // Serve static files from uploads directory
-    const path = require('path');
     await app.register(require('@fastify/static'), {
         root: path.join(process.cwd(), 'uploads'),
         prefix: '/storage/', // accessible via /storage/filename.ext
@@ -65,6 +69,26 @@ export async function buildApp(): Promise<FastifyInstance> {
         socket.on('disconnect', () => {
             app.log.info(`Client disconnected: ${socket.id}`);
         });
+    });
+
+    // Redis subscriber for events
+    const sub = new Redis({
+        host: env.REDIS_HOST,
+        port: env.REDIS_PORT,
+    });
+
+    sub.subscribe('build-events');
+    sub.on('message', (channel, message) => {
+        if (channel === 'build-events') {
+            try {
+                const event = JSON.parse(message);
+                if (event.buildId) {
+                    io.to(`build:${event.buildId}`).emit('build:update', event);
+                }
+            } catch (error) {
+                app.log.error(`Failed to parse build-event: ${String(error)}`);
+            }
+        }
     });
 
     // Attach io to app for use in routes

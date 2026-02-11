@@ -16,6 +16,7 @@ export class DockerService extends EventEmitter {
      * Build shell APK in Docker container with persistent cache volumes.
      */
     async buildShellAPK(config: {
+        repoId: string;
         repoUrl: string;
         branch: string;
         commit: string;
@@ -25,28 +26,32 @@ export class DockerService extends EventEmitter {
 
         logger.info(`Creating build container: ${containerName}`);
 
+        const uploadsPath = path.join(process.cwd(), 'uploads');
+
         const container = await this.docker.createContainer({
             Image: 'android-builder:latest',
             name: containerName,
             Env: [
+                `REPO_ID=${config.repoId}`,
                 `REPO_URL=${config.repoUrl}`,
                 `BRANCH=${config.branch}`,
-                `COMMIT=${config.commit}`,
+                `COMMIT_SHA=${config.commit}`,
                 `BUILD_ID=${config.buildId}`,
-                `BACKEND_URL=${env.BACKEND_URL}`,
             ],
             HostConfig: {
                 Memory: 4 * 1024 * 1024 * 1024, // 4GB
                 CpuQuota: 400000, // 4 cores
                 Binds: [
-                    // Persistent Gradle cache across builds (per-repo isolation available)
-                    `${env.GRADLE_CACHE_PATH}:/cache/gradle`,
+                    `${env.GRADLE_CACHE_PATH}:/root/.gradle`,
                     `${env.NPM_CACHE_PATH}:/root/.npm`,
-                    // Mount uploads directory so container can save APK directly
-                    `${path.join(process.cwd(), 'uploads')}:/app/uploads`,
+                    // Mount host uploads to container /output
+                    `${uploadsPath}:/output`,
+                    // Mount the build script
+                    `${path.join(process.cwd(), 'docker/build-shell.sh')}:/usr/local/bin/build-shell.sh:ro`,
                 ],
                 AutoRemove: false,
             },
+            Cmd: ['/bin/bash', '/usr/local/bin/build-shell.sh'],
         });
 
         // Attach to container output
@@ -68,9 +73,6 @@ export class DockerService extends EventEmitter {
         // Wait for completion
         const result = await container.wait();
 
-        // Get APK URL
-        const apkUrl = `${env.BACKEND_URL}/storage/shells/${config.commit}/app-debug.apk`;
-
         // Cleanup container
         logger.info(`Removing build container: ${containerName}`);
         await container.remove();
@@ -78,6 +80,9 @@ export class DockerService extends EventEmitter {
         if (result.StatusCode !== 0) {
             throw new Error(`Build failed with exit code ${result.StatusCode}`);
         }
+
+        // Return local URL prefix
+        const apkUrl = `/storage/shells/${config.repoId}/${config.commit}/shell.apk`;
 
         return apkUrl;
     }

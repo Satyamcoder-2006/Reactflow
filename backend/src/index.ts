@@ -4,6 +4,9 @@ import { prisma } from './db/prisma';
 import { redis } from './config/redis';
 
 async function start() {
+    // Start workers
+    await import('./workers');
+
     try {
         const app = await buildApp();
 

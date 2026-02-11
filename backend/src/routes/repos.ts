@@ -6,17 +6,30 @@ import { StorageService } from '../services/storage.service';
 import { shellBuildQueue } from '../workers/index';
 import { encrypt, decrypt, generateToken } from '../utils/crypto';
 import { env } from '../config/env';
+import { authenticateUser } from '../middleware/auth.middleware';
 import { logger } from '../utils/logger';
+
+/**
+ * Detects if a project is React Native or Expo
+ */
+async function isReactNativeProject(packageJson: any): Promise<{ isRN: boolean; framework: 'REACT_NATIVE' | 'EXPO' }> {
+    const deps = {
+        ...packageJson.dependencies,
+        ...packageJson.devDependencies
+    };
+
+    const isExpo = !!deps['expo'];
+    const isRN = !!deps['react-native'] || isExpo;
+
+    return {
+        isRN,
+        framework: isExpo ? 'EXPO' : 'REACT_NATIVE'
+    };
+}
 
 export async function repoRoutes(app: FastifyInstance) {
     // Authenticate all routes
-    app.addHook('onRequest', async (request, reply) => {
-        try {
-            await request.jwtVerify();
-        } catch (err) {
-            reply.send(err);
-        }
-    });
+    app.addHook('onRequest', authenticateUser);
 
     // List connected repositories
     app.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -109,6 +122,29 @@ export async function repoRoutes(app: FastifyInstance) {
             // Continue without webhook - user can still build manually
         }
 
+        // Detect React Native and Verify
+        const packageJson = await github.getPackageJson(owner, name, repoData.default_branch);
+
+        if (!packageJson) {
+            return reply.code(400).send({
+                error: 'INVALID_PROJECT',
+                message: 'package.json not found in repository'
+            });
+        }
+
+        const { isRN, framework } = await isReactNativeProject(packageJson);
+
+        if (!isRN) {
+            return reply.code(400).send({
+                error: 'NOT_REACT_NATIVE',
+                message: 'This repository does not appear to be a React Native project. We currently only support React Native and Expo projects.',
+                details: {
+                    detected: 'Unknown',
+                    supported: ['React Native', 'Expo']
+                }
+            });
+        }
+
         // Create repo record
         const repo = await prisma.repo.create({
             data: {
@@ -121,12 +157,11 @@ export async function repoRoutes(app: FastifyInstance) {
                 isPrivate: repoData.private,
                 webhookId,
                 webhookSecret: encrypt(webhookSecret, env.JWT_SECRET),
+                framework: framework,
             },
         });
 
         // Trigger initial build
-        const packageJson = await github.getPackageJson(owner, name, repoData.default_branch);
-
         if (packageJson) {
             const storageService = new StorageService();
             const shellService = new ShellService(storageService);

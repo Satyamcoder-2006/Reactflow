@@ -1,9 +1,7 @@
 import { Worker } from 'bullmq';
-import { EmulatorService } from '../services/emulator.service';
+import { emulatorService } from '../services/emulator.service';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
-
-const emulatorService = new EmulatorService();
 
 export const sessionCleanupWorker = new Worker(
     'session-cleanup',
@@ -11,7 +9,7 @@ export const sessionCleanupWorker = new Worker(
         logger.info('Running emulator session cleanup');
 
         try {
-            await emulatorService.cleanupExpired();
+            await emulatorService.cleanupExpiredSessions();
             return { success: true };
         } catch (error) {
             logger.error(`Session cleanup failed: ${String(error)}`);

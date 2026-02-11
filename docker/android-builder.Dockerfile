@@ -1,5 +1,6 @@
 FROM ubuntu:22.04
 
+# Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install dependencies
@@ -9,52 +10,35 @@ RUN apt-get update && apt-get install -y \
     unzip \
     git \
     curl \
+    python3 \
+    make \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
-
-# Install Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs
 
 # Install Android SDK
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 RUN mkdir -p ${ANDROID_SDK_ROOT}/cmdline-tools && \
-    wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip && \
-    unzip -q commandlinetools-linux-9477386_latest.zip -d ${ANDROID_SDK_ROOT}/cmdline-tools && \
-    mv ${ANDROID_SDK_ROOT}/cmdline-tools/cmdline-tools ${ANDROID_SDK_ROOT}/cmdline-tools/latest && \
-    rm commandlinetools-linux-9477386_latest.zip
+    cd ${ANDROID_SDK_ROOT}/cmdline-tools && \
+    wget https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip && \
+    unzip commandlinetools-linux-9477386_latest.zip && \
+    rm commandlinetools-linux-9477386_latest.zip && \
+    mv cmdline-tools latest
 
-ENV PATH="${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}"
+ENV PATH=${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin:${ANDROID_SDK_ROOT}/platform-tools:${PATH}
 
-# Accept licenses
-RUN yes | sdkmanager --licenses
+# Accept licenses and install SDK components
+RUN yes | sdkmanager --licenses && \
+    sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-# Install required SDK packages
-RUN sdkmanager \
-    "platform-tools" \
-    "platforms;android-34" \
-    "build-tools;34.0.0" \
-    "ndk;25.2.9519653"
+# Install Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
 
-# Install Gradle
-ENV GRADLE_VERSION=8.6
-RUN wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip && \
-    unzip -q gradle-${GRADLE_VERSION}-bin.zip -d /opt && \
-    ln -s /opt/gradle-${GRADLE_VERSION}/bin/gradle /usr/bin/gradle && \
-    rm gradle-${GRADLE_VERSION}-bin.zip
+# Create uploads directory structure within container
+RUN mkdir -p /output
 
-# Set Gradle cache
-ENV GRADLE_USER_HOME=/cache/gradle
-
-# Install AWS CLI
-RUN curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip" && \
-    unzip -q awscliv2.zip && \
-    ./aws/install && \
-    rm -rf aws awscliv2.zip
-
+# Set working directory
 WORKDIR /app
 
-# Build script
-COPY build-shell.sh /build-shell.sh
-RUN chmod +x /build-shell.sh
-
-ENTRYPOINT ["/build-shell.sh"]
+# The command to run the build script will be provided by the worker
+CMD ["/bin/bash"]

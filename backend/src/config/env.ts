@@ -23,6 +23,12 @@ export const env = {
     GRADLE_CACHE_PATH: process.env.GRADLE_CACHE_PATH || '/var/cache/gradle',
     NPM_CACHE_PATH: process.env.NPM_CACHE_PATH || '/var/cache/npm',
 
+    // AWS (Optional)
+    AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,
+    AWS_SECRET_ACCESS_KEY: process.env.AWS_SECRET_ACCESS_KEY,
+    AWS_REGION: process.env.AWS_REGION || 'us-east-1',
+    S3_BUCKET: process.env.S3_BUCKET,
+
     // API
     API_PORT: parseInt(process.env.API_PORT || '3001'),
     BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:3001',

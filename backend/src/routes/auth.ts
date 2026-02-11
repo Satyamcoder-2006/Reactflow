@@ -25,7 +25,7 @@ export async function authRoutes(app: FastifyInstance) {
                 }),
             });
 
-            const tokenData = await tokenResponse.json();
+            const tokenData = await tokenResponse.json() as any;
 
             if (tokenData.error) {
                 return reply.code(400).send({ error: tokenData.error_description });
@@ -41,7 +41,7 @@ export async function authRoutes(app: FastifyInstance) {
                 },
             });
 
-            const githubUser = await userResponse.json();
+            const githubUser = await userResponse.json() as any;
 
             // Create or update user
             const user = await prisma.user.upsert({

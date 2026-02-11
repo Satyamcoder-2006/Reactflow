@@ -32,13 +32,16 @@ export const apiClient = {
     disconnectRepo: (id: string) => api.delete(`/repos/${id}`),
 
     // Builds
-    listBuilds: (repoId: string) => api.get(`/builds/${repoId}`),
-    triggerBuild: (repoId: string) => api.post(`/builds/${repoId}`),
+    listBuilds: (repoId: string) => api.get(`/builds/repo/${repoId}`),
+    triggerBuild: (repoId: string, data: { branch?: string; buildType?: string } = {}) =>
+        api.post(`/builds/repo/${repoId}/build`, data),
     getBuild: (id: string) => api.get(`/builds/${id}`),
     getBuildLogs: (id: string) => api.get(`/builds/${id}/logs`),
+    cancelBuild: (id: string) => api.delete(`/builds/${id}`),
 
     // Sessions
-    createSession: (data: { repoId: string; shellId: string }) =>
+    listSessions: () => api.get('/sessions'),
+    createSession: (data: { repoId: string; shellId?: string; emulatorConfig?: any }) =>
         api.post('/sessions', data),
     getSession: (id: string) => api.get(`/sessions/${id}`),
     stopSession: (id: string) => api.delete(`/sessions/${id}`),

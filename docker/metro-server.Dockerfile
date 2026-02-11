@@ -1,14 +1,18 @@
-FROM node:20
+FROM node:20-slim
+
+# Install git and other build tools
+RUN apt-get update && apt-get install -y \
+    git \
+    python3 \
+    make \
+    g++ \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Metro globally
-RUN npm install -g metro metro-runtime
+# Expose Metro bundler port
+EXPOSE 8081
 
-# Copy start script
-COPY start-metro.sh /start-metro.sh
-RUN chmod +x /start-metro.sh
-
-EXPOSE 8081 8082
-
-CMD ["/start-metro.sh"]
+# Start Metro bundler
+CMD ["npx", "react-native", "start", "--host", "0.0.0.0", "--reset-cache"]

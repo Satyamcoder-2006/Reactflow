@@ -94,7 +94,7 @@ export class GitHubService {
 
             return null;
         } catch (error) {
-            logger.error(`Failed to fetch package.json for ${owner}/${repo}@${ref}:`, error);
+            logger.error(`Failed to fetch package.json for ${owner}/${repo}@${ref}: ${String(error)}`);
             return null;
         }
     }
@@ -110,7 +110,7 @@ export class GitHubService {
             execSync(command, { stdio: 'inherit' });
             logger.info(`Repository cloned to ${targetPath}`);
         } catch (error) {
-            logger.error(`Failed to clone repository:`, error);
+            logger.error(`Failed to clone repository: ${String(error)}`);
             throw new Error(`Git clone failed: ${error}`);
         }
     }
