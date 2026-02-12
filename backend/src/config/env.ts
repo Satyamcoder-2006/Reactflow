@@ -1,4 +1,5 @@
 import { config } from 'dotenv';
+import path from 'path';
 
 config();
 
@@ -20,8 +21,8 @@ export const env = {
 
     // Build
     BUILD_CONCURRENCY: parseInt(process.env.BUILD_CONCURRENCY || '5'),
-    GRADLE_CACHE_PATH: process.env.GRADLE_CACHE_PATH || '/var/cache/gradle',
-    NPM_CACHE_PATH: process.env.NPM_CACHE_PATH || '/var/cache/npm',
+    GRADLE_CACHE_PATH: path.resolve(process.env.GRADLE_CACHE_PATH || path.join(process.cwd(), '.cache/gradle')),
+    NPM_CACHE_PATH: path.resolve(process.env.NPM_CACHE_PATH || path.join(process.cwd(), '.cache/npm')),
 
     // AWS (Optional)
     AWS_ACCESS_KEY_ID: process.env.AWS_ACCESS_KEY_ID,

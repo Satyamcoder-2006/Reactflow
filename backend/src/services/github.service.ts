@@ -30,6 +30,18 @@ export class GitHubService {
     }
 
     /**
+     * Get latest commit for a branch
+     */
+    async getLatestCommit(owner: string, repo: string, branch: string = 'main') {
+        const { data } = await this.octokit.repos.getCommit({
+            owner,
+            repo,
+            ref: branch,
+        });
+        return data;
+    }
+
+    /**
      * Create webhook for repository
      */
     async createWebhook(owner: string, repo: string, callbackUrl: string, secret: string) {

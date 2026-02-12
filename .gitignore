@@ -9,3 +9,9 @@ build
 coverage
 .vscode
 .idea
+.cache
+uploads
+*.class
+*.apk
+bin/
+obj/

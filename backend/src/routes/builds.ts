@@ -1,20 +1,30 @@
 import { FastifyInstance } from 'fastify';
+import rateLimit from '@fastify/rate-limit';
 import { prisma } from '../db/prisma';
 import { addShellBuildJob } from '../queues/build.queue';
 import { authenticateUser } from '../middleware/auth.middleware';
 import { createBuildSchema, listBuildsSchema, buildDetailSchema } from '../schemas/build.schema';
 import { handlePrismaError } from '../utils/error-handler';
+import { decrypt } from '../utils/crypto';
+import { env } from '../config/env';
 
 export async function buildRoutes(app: FastifyInstance) {
     // Authenticate all routes in this plugin
     app.addHook('onRequest', authenticateUser);
+
+    // Register rate limit
+    await app.register(rateLimit, {
+        max: 50,
+        timeWindow: '1 hour',
+        keyGenerator: (request) => request.user!.id,
+    });
 
     // List builds for repository
     app.get<{
         Params: { repoId: string };
     }>('/repo/:repoId', {
         schema: listBuildsSchema
-    }, async (request, reply) => {
+    }, async (request: any, reply) => {
         const { repoId } = request.params;
         const userId = request.user!.id;
 
@@ -47,55 +57,96 @@ export async function buildRoutes(app: FastifyInstance) {
     // Trigger manual build
     app.post<{
         Params: { repoId: string };
-        Body: { branch?: string; buildType?: 'SHELL' | 'HOT_RELOAD' };
+        Body: {
+            branch?: string;
+            buildType?: 'SHELL' | 'HOT_RELOAD';
+            autoStartSession?: boolean;
+            emulatorConfig?: {
+                deviceType: string;
+                androidVersion: number;
+            };
+        };
     }>('/repo/:repoId/build', {
         schema: createBuildSchema
     }, async (request, reply) => {
         const { repoId } = request.params;
-        const { branch, buildType } = request.body;
+        const { branch, buildType, autoStartSession, emulatorConfig } = request.body;
         const userId = request.user!.id;
 
         try {
-            const result = await prisma.$transaction(async (tx) => {
-                const repo = await tx.repo.findFirst({
-                    where: { id: repoId, userId },
+            // 1. Fetch Repo and User Token
+            const repo = await prisma.repo.findFirst({
+                where: { id: repoId, userId },
+            });
+
+            if (!repo) {
+                return reply.code(404).send({ error: 'Repository not found' });
+            }
+
+            const user = await prisma.user.findUnique({
+                where: { id: userId },
+                select: { githubToken: true }
+            });
+
+            if (!user?.githubToken) {
+                return reply.code(400).send({ error: 'GITHUB_TOKEN_MISSING', message: 'GitHub token not found' });
+            }
+
+            // 2. Resolve target branch and fetch latest commit from GitHub
+            const targetBranch = branch || repo.defaultBranch;
+            const { GitHubService } = await import('../services/github.service');
+            const decryptedToken = decrypt(user.githubToken, env.JWT_SECRET);
+            const githubService = new GitHubService(decryptedToken);
+
+            let commitSha: string;
+            try {
+                const commitInfo = await githubService.getLatestCommit(repo.owner, repo.name, targetBranch);
+                commitSha = commitInfo.sha;
+            } catch (githubError: any) {
+                app.log.error(`GitHub API error: ${githubError.message}`);
+                return reply.code(400).send({
+                    error: 'GIT_REF_NOT_FOUND',
+                    message: `Could not find branch or commit: ${targetBranch}`
                 });
+            }
 
-                if (!repo) {
-                    throw new Error('NOT_FOUND');
-                }
-
-                // Create build record
+            const result = await prisma.$transaction(async (tx) => {
                 const build = await tx.build.create({
                     data: {
-                        repo: { connect: { id: repoId } },
-                        user: { connect: { id: userId } },
-                        branch: branch || repo.defaultBranch,
-                        commit: 'HEAD', // Will be resolved during build
+                        repoId,
+                        userId,
+                        branch: targetBranch,
+                        commit: commitSha,
                         buildType: buildType || 'SHELL',
-                        triggerType: 'MANUAL',
                         status: 'QUEUED',
+                        triggerType: 'MANUAL',
                     },
                 });
 
-                return { build, repo };
+                if (build.buildType === 'SHELL') {
+                    await addShellBuildJob({
+                        buildId: build.id,
+                        repoId,
+                        userId,
+                        repoUrl: `https://github.com/${repo.fullName}`,
+                        branch: targetBranch,
+                        commit: commitSha,
+                        autoStartSession: autoStartSession || false,
+                        emulatorConfig,
+                    });
+                }
+
+                return build;
             });
 
-            const { build, repo } = result;
-
-            // Queue build job
-            await addShellBuildJob({
-                buildId: build.id,
-                repoId,
-                userId,
-                repoUrl: `https://github.com/${repo.fullName}`,
-                branch: build.branch,
-                commit: 'HEAD',
-            });
-
-            return { build };
+            return {
+                build: result,
+                message: autoStartSession
+                    ? 'Build queued. Emulator will start automatically upon completion.'
+                    : 'Build queued'
+            };
         } catch (error: any) {
-            if (error.message === 'NOT_FOUND') {
+            if (error.message === 'REPO_NOT_FOUND') {
                 return reply.code(404).send({ error: 'Repository not found' });
             }
             const appError = handlePrismaError(error);

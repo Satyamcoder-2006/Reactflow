@@ -54,6 +54,11 @@ export async function addShellBuildJob(data: {
     commit: string;
     packageJson?: any;
     dependencyHash?: string;
+    autoStartSession?: boolean;
+    emulatorConfig?: {
+        deviceType: string;
+        androidVersion: number;
+    };
 }) {
     const jobId = `shell-build-${data.repoId}-${data.commit}`;
 

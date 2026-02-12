@@ -1,7 +1,6 @@
 import Fastify, { FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
-import websocket from '@fastify/websocket';
 import { Server } from 'socket.io';
 import Redis from 'ioredis';
 import path from 'path';
@@ -28,7 +27,6 @@ export async function buildApp(): Promise<any> {
         },
     });
 
-    await app.register(websocket);
 
     // Serve static files from uploads directory
     await app.register(require('@fastify/static'), {
@@ -53,8 +51,26 @@ export async function buildApp(): Promise<any> {
         },
     });
 
+    // Socket.IO Authentication Middleware
+    io.use(async (socket, next) => {
+        const token = socket.handshake.auth.token || socket.handshake.query.token;
+        if (!token) return next(new Error('Authentication failed: No token provided'));
+
+        try {
+            const decoded = app.jwt.verify(token) as { id: string };
+            socket.data.userId = decoded.id;
+
+            // Join user-specific room
+            socket.join(`user:${decoded.id}`);
+            next();
+        } catch (error) {
+            next(new Error('Authentication failed: Invalid token'));
+        }
+    });
+
     io.on('connection', (socket) => {
-        app.log.info(`Client connected: ${socket.id}`);
+        const userId = socket.data.userId;
+        app.log.info(`Client connected: ${socket.id} (User: ${userId})`);
 
         socket.on('subscribe:build', (buildId: string) => {
             socket.join(`build:${buildId}`);
@@ -77,19 +93,39 @@ export async function buildApp(): Promise<any> {
         port: env.REDIS_PORT,
     });
 
-    sub.subscribe('build-events');
+    sub.subscribe('build-events', 'session-events');
     sub.on('message', (channel, message) => {
-        if (channel === 'build-events') {
-            try {
-                const event = JSON.parse(message);
+        try {
+            const event = JSON.parse(message);
+
+            if (channel === 'build-events') {
                 if (event.buildId) {
                     io.to(`build:${event.buildId}`).emit('build:update', event);
                 }
-            } catch (error) {
-                app.log.error(`Failed to parse build-event: ${String(error)}`);
+                if (event.userId) {
+                    io.to(`user:${event.userId}`).emit('build:event', event);
+                }
+            } else if (channel === 'session-events') {
+                if (event.sessionId) {
+                    io.to(`session:${event.sessionId}`).emit('session:event', event);
+                }
+                if (event.userId) {
+                    io.to(`user:${event.userId}`).emit('session:event', event);
+                }
             }
+        } catch (error) {
+            app.log.error(`Failed to parse event from channel ${channel}: ${String(error)}`);
         }
     });
+
+    // Worker Health Checks
+    const { shellBuildQueue } = await import('./queues/build.queue');
+    setInterval(async () => {
+        const workers = await shellBuildQueue.getWorkers();
+        if (workers.length === 0) {
+            app.log.error('⚠️ No build workers running!');
+        }
+    }, 60000);
 
     // Attach io to app for use in routes
     app.decorate('io', io);
@@ -101,6 +137,7 @@ export async function buildApp(): Promise<any> {
     const { sessionRoutes } = await import('./routes/sessions');
     const { webhookRoutes } = await import('./routes/webhooks');
     const { webrtcRoutes } = await import('./routes/webrtc');
+    const { adminRoutes } = await import('./routes/admin');
 
     await app.register(authRoutes, { prefix: '/api/auth' });
     await app.register(repoRoutes, { prefix: '/api/repos' });
@@ -108,6 +145,9 @@ export async function buildApp(): Promise<any> {
     await app.register(sessionRoutes, { prefix: '/api/sessions' });
     await app.register(webhookRoutes, { prefix: '/api/webhooks' });
     await app.register(webrtcRoutes, { prefix: '/api/webrtc' });
+    await app.register(adminRoutes, { prefix: '/api/admin' });
+
+    // Graceful Shutdown handled in index.ts for better control
 
     return app;
 }

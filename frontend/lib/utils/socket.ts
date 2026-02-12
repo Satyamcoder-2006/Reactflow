@@ -6,21 +6,28 @@ let socket: Socket | null = null;
 
 export function getSocket(): Socket {
     if (!socket) {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+
         socket = io(WS_URL, {
             withCredentials: true,
             autoConnect: true,
+            auth: { token },
+            transports: ['websocket'],
         });
 
         socket.on('connect', () => {
             console.log('✅ Socket connected:', socket!.id);
         });
 
-        socket.on('disconnect', () => {
-            console.log('❌ Socket disconnected');
+        socket.on('disconnect', (reason) => {
+            console.log('❌ Socket disconnected:', reason);
         });
 
-        socket.on('error', (error) => {
-            console.error('Socket error:', error);
+        socket.on('connect_error', (error) => {
+            console.error('Socket connection error:', error.message);
+            if (error.message.includes('Authentication failed')) {
+                // Potential logout or refresh token logic
+            }
         });
     }
 
@@ -35,6 +42,12 @@ export function subscribeToBuild(buildId: string) {
 export function subscribeToSession(sessionId: string) {
     const socket = getSocket();
     socket.emit('subscribe:session', sessionId);
+}
+
+export function subscribeToUser(userId: string) {
+    const socket = getSocket();
+    // No explicit emit needed if the backend automatically joins user to room on connection
+    // But we can add it for clarity or manual room joining if needed.
 }
 
 export function disconnectSocket() {

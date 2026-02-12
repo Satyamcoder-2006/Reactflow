@@ -1,13 +1,21 @@
 import { Worker, Job } from 'bullmq';
-import { prisma } from '../db/prisma';
+import { WorkerContext } from './worker-auth';
+import { SessionEventPublisher } from '../events/session-events';
 import { DockerService } from '../services/docker.service';
+import { EmulatorService } from '../services/emulator.service';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
-import { redis } from '../config/redis';
 import path from 'path';
 import fs from 'fs-extra';
 
+// Initialize context ONCE
+WorkerContext.initialize().catch(err => {
+    logger.error('Failed to initialize worker context:', err);
+    process.exit(1);
+});
+
 const dockerService = new DockerService();
+const emulatorService = new EmulatorService();
 
 interface ShellBuildJob {
     buildId: string;
@@ -16,12 +24,16 @@ interface ShellBuildJob {
     repoUrl: string;
     branch: string;
     commit: string;
+    autoStartSession?: boolean;
 }
 
 export const shellBuilderWorker = new Worker<ShellBuildJob>(
     'shell-build',
     async (job: Job<ShellBuildJob>) => {
-        const { buildId, repoId, repoUrl, branch, commit } = job.data;
+        const { buildId, repoId, userId, repoUrl, branch, commit, autoStartSession } = job.data;
+        const prisma = WorkerContext.getPrisma();
+        const redis = WorkerContext.getRedis();
+        const eventPublisher = new SessionEventPublisher(redis);
 
         logger.info(`Starting shell build job for build ${buildId}`);
 
@@ -37,6 +49,7 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
                 type: 'build:started',
                 buildId,
                 repoId,
+                userId,
                 timestamp: new Date().toISOString()
             }));
 
@@ -51,14 +64,17 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
                 await prisma.buildLog.createMany({
                     data: batch.map(message => ({
                         buildId,
-                        message: message.trim(),
+                        message: message.replace(/\u0000/g, '').trim(),
                         level: 'INFO',
                     })),
-                }).catch(err => logger.error('Failed to save build logs batch', err));
+                }).catch(err => {
+                    logger.error(err, 'Failed to save build logs batch');
+                });
 
                 await redis.publish('build-events', JSON.stringify({
                     type: 'build:log',
                     buildId,
+                    userId,
                     message: batch[batch.length - 1]?.trim(),
                 }));
             };
@@ -123,7 +139,7 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
                     apkSize: metadata.apkSize,
                     buildTime: buildTime,
                     reactNativeVersion: 'resolved-during-build',
-                    dependencies: {}, // Added required field
+                    dependencies: {},
                 },
                 update: {
                     apkUrl,
@@ -137,14 +153,45 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
                 type: 'build:complete',
                 buildId,
                 repoId,
+                userId,
                 apkUrl,
+                timestamp: new Date().toISOString()
             }));
 
             dockerService.off('log', logListener);
 
+            // Auto-start session if requested
+            if (autoStartSession) {
+                try {
+                    // Check for existing session to avoid duplicates (Race condition handling)
+                    const existingSession = await prisma.emulatorSession.findFirst({
+                        where: {
+                            repoId,
+                            userId,
+                            status: { in: ['STARTING', 'RUNNING'] }
+                        }
+                    });
+
+                    if (existingSession) {
+                        logger.info(`Session already exists for repo ${repoId}, triggering reload instead.`);
+                        await eventPublisher.publishReload(existingSession.id, userId, buildId);
+                    } else {
+                        logger.info(`Auto-starting session for user ${userId} build ${buildId}`);
+                        await emulatorService.createSession({
+                            userId,
+                            repoId,
+                            shellId: buildId
+                        });
+                    }
+                } catch (sessionError: any) {
+                    logger.error('Failed to auto-start session after build:', sessionError);
+                    await eventPublisher.publishError('pending', userId, 'AUTO_START_FAILED', sessionError.message);
+                }
+            }
+
             return { success: true, apkUrl };
         } catch (error: any) {
-            logger.error(`Build ${buildId} failed:`, error);
+            logger.error({ err: error, buildId }, `Build ${buildId} failed`);
             await prisma.build.update({
                 where: { id: buildId },
                 data: {
@@ -159,7 +206,9 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
                 type: 'build:failed',
                 buildId,
                 repoId,
+                userId,
                 error: error.message,
+                timestamp: new Date().toISOString()
             }));
 
             throw error;

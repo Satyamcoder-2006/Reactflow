@@ -55,7 +55,7 @@ export async function webhookRoutes(app: FastifyInstance) {
             const commitAuthor = body.head_commit?.author?.name;
 
             // Initialize services
-            const github = new GitHubService(repo.user.githubToken);
+            const github = new GitHubService(decrypt(repo.user.githubToken, env.JWT_SECRET));
             const changeDetection = new ChangeDetectionService(github);
             const storageService = new StorageService();
             const shellService = new ShellService(storageService);

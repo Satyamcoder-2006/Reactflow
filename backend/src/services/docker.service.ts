@@ -35,7 +35,7 @@ export class DockerService extends EventEmitter {
                 `REPO_ID=${config.repoId}`,
                 `REPO_URL=${config.repoUrl}`,
                 `BRANCH=${config.branch}`,
-                `COMMIT_SHA=${config.commit}`,
+                `COMMIT=${config.commit}`,
                 `BUILD_ID=${config.buildId}`,
             ],
             HostConfig: {
@@ -47,7 +47,7 @@ export class DockerService extends EventEmitter {
                     // Mount host uploads to container /output
                     `${uploadsPath}:/output`,
                     // Mount the build script
-                    `${path.join(process.cwd(), 'docker/build-shell.sh')}:/usr/local/bin/build-shell.sh:ro`,
+                    `${path.resolve(process.cwd(), '../docker/build-shell.sh')}:/usr/local/bin/build-shell.sh:ro`,
                 ],
                 AutoRemove: false,
             },

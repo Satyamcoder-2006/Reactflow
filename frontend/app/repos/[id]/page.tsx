@@ -21,6 +21,7 @@ export default function RepoDetailPage() {
     const [activeBuildId, setActiveBuildId] = useState<string | null>(null);
     const [sessionId, setSessionId] = useState<string | null>(null);
     const [startingSession, setStartingSession] = useState(false);
+    const [autoStartSession, setAutoStartSession] = useState(false);
 
     const fetchRepo = async () => {
         try {
@@ -44,29 +45,53 @@ export default function RepoDetailPage() {
         if (repoId) {
             fetchRepo();
 
-            // Listen for build events to update repo data
+            // Listen for events to update repo data
             const socket = getSocket();
+
+            const handleBuildEvent = (event: any) => {
+                if (event.repoId !== repoId) return;
+
+                if (event.type === 'build:started') {
+                    setActiveBuildId(event.buildId);
+                    fetchRepo();
+                } else if (event.type === 'build:complete' || event.type === 'build:failed') {
+                    fetchRepo();
+                }
+            };
+
+            const handleSessionEvent = (event: any) => {
+                if (event.type === 'session:status' && event.sessionId) {
+                    setSessionId(event.sessionId);
+                }
+            };
+
+            socket.on('build:event', handleBuildEvent);
+            socket.on('session:event', handleSessionEvent);
+
+            // Backward compatibility listeners
             socket.on('build:started', ({ buildId }) => {
                 setActiveBuildId(buildId);
                 fetchRepo();
             });
             socket.on('build:complete', () => {
-                // Keep activeBuildId for a moment to show success state if needed, or clear it
-                // For now, let's clear it so logs hide or move to history
-                // But user might want to see logs. Let's keep it if selected.
                 fetchRepo();
             });
         }
         return () => {
-            getSocket().off('build:started');
-            getSocket().off('build:complete');
+            const socket = getSocket();
+            socket.off('build:event');
+            socket.off('session:event');
+            socket.off('build:started');
+            socket.off('build:complete');
         };
     }, [repoId]);
 
     const handleTriggerBuild = async () => {
         setTriggering(true);
         try {
-            const res = await apiClient.triggerBuild(repoId);
+            const res = await apiClient.triggerBuild(repoId, {
+                autoStartSession
+            } as any);
             setActiveBuildId(res.data.build.id);
             fetchRepo();
         } catch (error) {
@@ -189,6 +214,19 @@ export default function RepoDetailPage() {
                                     {startingSession ? 'Starting...' : 'Preview App'}
                                 </button>
                             )}
+
+                            <div className="flex items-center gap-2 mr-2">
+                                <input
+                                    type="checkbox"
+                                    id="autoStart"
+                                    checked={autoStartSession}
+                                    onChange={(e) => setAutoStartSession(e.target.checked)}
+                                    className="w-4 h-4 rounded border-border bg-secondary text-primary focus:ring-primary"
+                                />
+                                <label htmlFor="autoStart" className="text-sm cursor-pointer select-none">
+                                    Auto-start emulator
+                                </label>
+                            </div>
 
                             <button
                                 onClick={handleTriggerBuild}

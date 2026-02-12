@@ -6,15 +6,24 @@ export const createBuildSchema = {
         type: 'object',
         required: ['repoId'],
         properties: {
-            repoId: { type: 'string', minLength: 1 },
+            repoId: { type: 'string', pattern: '^[a-zA-Z0-9_-]+$' },
         },
     },
     body: {
         type: 'object',
         properties: {
-            branch: { type: 'string', default: 'main' },
+            branch: { type: 'string', default: 'main', pattern: '^[a-zA-Z0-9/_-]+$' },
             buildType: { type: 'string', enum: ['SHELL', 'HOT_RELOAD'], default: 'SHELL' },
+            autoStartSession: { type: 'boolean', default: false },
+            emulatorConfig: {
+                type: 'object',
+                properties: {
+                    deviceType: { type: 'string', enum: ['phone', 'tablet'], default: 'phone' },
+                    androidVersion: { type: 'number', minimum: 28, maximum: 34, default: 33 },
+                }
+            }
         },
+        additionalProperties: false,
     },
 };
 
