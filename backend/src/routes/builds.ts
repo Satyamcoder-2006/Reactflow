@@ -1,7 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import rateLimit from '@fastify/rate-limit';
 import { prisma } from '../db/prisma';
-import { addShellBuildJob } from '../queues/build.queue';
+import { addShellBuildJob, triggerSessionStart } from '../queues/build.queue';
 import { authenticateUser } from '../middleware/auth.middleware';
 import { createBuildSchema, listBuildsSchema, buildDetailSchema } from '../schemas/build.schema';
 import { handlePrismaError } from '../utils/error-handler';
@@ -92,24 +92,62 @@ export async function buildRoutes(app: FastifyInstance) {
                 return reply.code(400).send({ error: 'GITHUB_TOKEN_MISSING', message: 'GitHub token not found' });
             }
 
-            // 2. Resolve target branch and fetch latest commit from GitHub
+            // 2. Resolve target branch and fetch latest commit from GitHub using Octokit
             const targetBranch = branch || repo.defaultBranch;
-            const { GitHubService } = await import('../services/github.service');
+            const { Octokit } = await import('@octokit/rest');
             const decryptedToken = decrypt(user.githubToken, env.JWT_SECRET);
-            const githubService = new GitHubService(decryptedToken);
+            const octokit = new Octokit({ auth: decryptedToken });
 
             let commitSha: string;
             try {
-                const commitInfo = await githubService.getLatestCommit(repo.owner, repo.name, targetBranch);
-                commitSha = commitInfo.sha;
+                const { data: branchData } = await octokit.repos.getBranch({
+                    owner: repo.owner,
+                    repo: repo.name,
+                    branch: targetBranch
+                });
+                commitSha = branchData.commit.sha;
             } catch (githubError: any) {
                 app.log.error(`GitHub API error: ${githubError.message}`);
                 return reply.code(400).send({
                     error: 'GIT_REF_NOT_FOUND',
-                    message: `Could not find branch or commit: ${targetBranch}`
+                    message: `Could not find branch '${targetBranch}' in repository`
                 });
             }
 
+            // 3. Check for existing builds to deduplicate
+            const existingBuild = await prisma.build.findFirst({
+                where: {
+                    repoId,
+                    commit: commitSha,
+                    status: { in: ['QUEUED', 'BUILDING', 'SUCCESS'] }
+                }
+            });
+
+            if (existingBuild) {
+                // If a successful build exists and autoStart is true, trigger session
+                if (existingBuild.status === 'SUCCESS' && autoStartSession) {
+                    await triggerSessionStart({
+                        userId,
+                        repoId,
+                        buildId: existingBuild.id,
+                        emulatorConfig
+                    });
+
+                    return reply.send({
+                        build: existingBuild,
+                        message: 'Build already exists. Starting emulator session...'
+                    });
+                }
+
+                return reply.send({
+                    build: existingBuild,
+                    message: existingBuild.status === 'SUCCESS'
+                        ? 'Build already exists for this commit'
+                        : 'Build already in progress for this commit'
+                });
+            }
+
+            // 4. Create new build and queue job
             const result = await prisma.$transaction(async (tx) => {
                 const build = await tx.build.create({
                     data: {
@@ -139,12 +177,12 @@ export async function buildRoutes(app: FastifyInstance) {
                 return build;
             });
 
-            return {
+            return reply.send({
                 build: result,
                 message: autoStartSession
                     ? 'Build queued. Emulator will start automatically upon completion.'
                     : 'Build queued'
-            };
+            });
         } catch (error: any) {
             if (error.message === 'REPO_NOT_FOUND') {
                 return reply.code(404).send({ error: 'Repository not found' });

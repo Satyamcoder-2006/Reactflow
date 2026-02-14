@@ -3,8 +3,20 @@ import { env } from './config/env';
 import { prisma } from './db/prisma';
 import { redis } from './config/redis';
 import { WorkerContext } from './workers/worker-auth';
+import killPort from 'kill-port';
 
 async function start() {
+    // In development/etc, ensure the port is free before starting
+    if (process.env.NODE_ENV !== 'production') {
+        try {
+            await killPort(env.API_PORT);
+            console.log(`✅ Port ${env.API_PORT} cleared`);
+        } catch (err) {
+            // Non-fatal, just log it
+            console.log(`ℹ️ Note: Could not kill port ${env.API_PORT} (this is normal if nothing was using it)`);
+        }
+    }
+
     // Start Worker Context & Workers
     await WorkerContext.initialize();
     const workers = await import('./workers');

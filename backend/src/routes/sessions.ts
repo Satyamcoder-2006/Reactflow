@@ -117,11 +117,82 @@ export async function sessionRoutes(app: FastifyInstance) {
             await emulatorService.sendInput(id, userId, input);
             return { success: true };
         } catch (error: any) {
+            console.error('Error in POST /input:', error); // Added logging
             const appError = handlePrismaError(error);
             return reply.code(appError.statusCode).send({
                 error: appError.code,
                 message: appError.message
             });
         }
+    });
+
+    // Get screen capture (PNG)
+    app.get<{
+        Params: { id: string };
+    }>('/:id/screen', {
+        schema: sessionParamsSchema
+    }, async (request, reply) => {
+        const userId = request.user!.id;
+        const { id } = request.params;
+
+        try {
+            const buffer = await emulatorService.getScreenshot(id, userId);
+            return reply.type('image/png').send(buffer);
+        } catch (error: any) {
+            const appError = handlePrismaError(error);
+            return reply.code(appError.statusCode).send({
+                error: appError.code,
+                message: appError.message
+            });
+        }
+    });
+
+    // Get MJPEG stream
+    app.get<{
+        Params: { id: string };
+    }>('/:id/stream', {
+        schema: sessionParamsSchema
+    }, async (request, reply) => {
+        const userId = request.user!.id;
+        const { id } = request.params;
+
+        // Set headers for multipart stream
+        reply.raw.writeHead(200, {
+            'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no' // Disable Nginx buffering if present
+        });
+
+        const callback = async () => {
+            try {
+                // Get JPEG frame (compressed)
+                const buffer = await emulatorService.getScreenshotJpeg(id, userId);
+
+                // Write multipart frame
+                reply.raw.write(`--frame\r\n`);
+                reply.raw.write(`Content-Type: image/jpeg\r\n`);
+                reply.raw.write(`Content-Length: ${buffer.length}\r\n\r\n`);
+                reply.raw.write(buffer);
+                reply.raw.write(`\r\n`);
+            } catch (error) {
+                // Stop on error (session likely stopped)
+                clearInterval(interval);
+                reply.raw.end();
+            }
+        };
+
+        // Initial frame
+        await callback();
+
+        const interval = setInterval(callback, 100); // 10 FPS
+
+        // Cleanup on client disconnect
+        request.raw.on('close', () => {
+            clearInterval(interval);
+        });
+
+        // Keep connection open
+        return reply;
     });
 }

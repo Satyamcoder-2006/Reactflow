@@ -12,15 +12,25 @@ export const createBuildSchema = {
     body: {
         type: 'object',
         properties: {
-            branch: { type: 'string', default: 'main', pattern: '^[a-zA-Z0-9/_-]+$' },
-            buildType: { type: 'string', enum: ['SHELL', 'HOT_RELOAD'], default: 'SHELL' },
+            branch: {
+                type: 'string',
+                default: 'main',
+                pattern: '^[a-zA-Z0-9/_.-]+$',
+                maxLength: 255
+            },
             autoStartSession: { type: 'boolean', default: false },
             emulatorConfig: {
                 type: 'object',
                 properties: {
                     deviceType: { type: 'string', enum: ['phone', 'tablet'], default: 'phone' },
-                    androidVersion: { type: 'number', minimum: 28, maximum: 34, default: 33 },
-                }
+                    androidVersion: { type: 'integer', minimum: 28, maximum: 35, default: 33 },
+                    screenDensity: {
+                        type: 'string',
+                        enum: ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'],
+                        default: 'xhdpi'
+                    }
+                },
+                additionalProperties: false
             }
         },
         additionalProperties: false,

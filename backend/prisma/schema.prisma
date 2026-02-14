@@ -181,6 +181,9 @@ model Build {
   // Logs
   logs            BuildLog[]
   
+  // Sessions
+  sessions        EmulatorSession[]
+  
   // Error Info
   error           String?     @db.Text
   errorStack      String?     @db.Text
@@ -292,8 +295,11 @@ model EmulatorSession {
   userId          String
   user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
   
-  shellId         String
-  shell           Shell           @relation(fields: [shellId], references: [id])
+  shellId         String?
+  shell           Shell?          @relation(fields: [shellId], references: [id])
+  
+  buildId         String?
+  build           Build?          @relation(fields: [buildId], references: [id])
   
   metroId         String?
   metro           MetroInstance?  @relation(fields: [metroId], references: [id])

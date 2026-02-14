@@ -4,10 +4,30 @@ import jwt from '@fastify/jwt';
 import { Server } from 'socket.io';
 import Redis from 'ioredis';
 import path from 'path';
+import fs from 'fs-extra';
 import { env } from './config/env';
 import { logger } from './utils/logger';
 
+async function initializeDirectories() {
+    const dirs = [
+        '.cache/gradle',
+        '.cache/npm',
+        'uploads/shells',
+        'uploads/logs',
+        'temp'
+    ];
+
+    for (const dir of dirs) {
+        const fullPath = path.isAbsolute(dir) ? dir : path.join(process.cwd(), dir);
+        await fs.ensureDir(fullPath);
+        logger.info(`✅ Directory ensured: ${fullPath}`);
+    }
+}
+
 export async function buildApp(): Promise<any> {
+    // Initialize required directories first
+    await initializeDirectories();
+
     const app = Fastify({
         logger: logger,
         requestIdHeader: 'x-request-id',
@@ -90,7 +110,7 @@ export async function buildApp(): Promise<any> {
     // Redis subscriber for events
     const sub = new Redis({
         host: env.REDIS_HOST,
-        port: env.REDIS_PORT,
+        port: Number(env.REDIS_PORT),
     });
 
     sub.subscribe('build-events', 'session-events');
@@ -99,16 +119,20 @@ export async function buildApp(): Promise<any> {
             const event = JSON.parse(message);
 
             if (channel === 'build-events') {
+                // Emit to entity-specific room
                 if (event.buildId) {
-                    io.to(`build:${event.buildId}`).emit('build:update', event);
+                    io.to(`build:${event.buildId}`).emit('build:event', event);
                 }
+                // Emit to user-specific room
                 if (event.userId) {
                     io.to(`user:${event.userId}`).emit('build:event', event);
                 }
             } else if (channel === 'session-events') {
+                // Emit to entity-specific room
                 if (event.sessionId) {
                     io.to(`session:${event.sessionId}`).emit('session:event', event);
                 }
+                // Emit to user-specific room
                 if (event.userId) {
                     io.to(`user:${event.userId}`).emit('session:event', event);
                 }
@@ -117,6 +141,15 @@ export async function buildApp(): Promise<any> {
             app.log.error(`Failed to parse event from channel ${channel}: ${String(error)}`);
         }
     });
+
+    // Graceful Shutdown for Redis Sub
+    const subCleanup = async () => {
+        app.log.info('Closing Redis subscriber...');
+        await sub.unsubscribe();
+        await sub.quit();
+    };
+    process.on('SIGTERM', subCleanup);
+    process.on('SIGINT', subCleanup);
 
     // Worker Health Checks
     const { shellBuildQueue } = await import('./queues/build.queue');

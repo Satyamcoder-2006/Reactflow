@@ -1,6 +1,8 @@
 import Docker from 'dockerode';
 import { EventEmitter } from 'events';
 import path from 'path';
+import fs from 'fs-extra';
+import { PassThrough } from 'stream';
 import { logger } from '../utils/logger';
 import { env } from '../config/env';
 
@@ -10,6 +12,49 @@ export class DockerService extends EventEmitter {
     constructor() {
         super();
         this.docker = new Docker();
+    }
+
+    // ... existing code ...
+
+    /**
+     * Execute command in container and return Buffer (stdout only).
+     */
+    async execInContainerBuffer(containerId: string, cmd: string[]): Promise<Buffer> {
+        const container = this.docker.getContainer(containerId);
+
+        const exec = await container.exec({
+            Cmd: cmd,
+            AttachStdout: true,
+            AttachStderr: true,
+        });
+
+        const stream = await exec.start({ Detach: false });
+
+        return new Promise((resolve, reject) => {
+            const stdout = new PassThrough();
+            const stderr = new PassThrough(); // Drain stderr
+            const chunks: Buffer[] = [];
+
+            container.modem.demuxStream(stream, stdout, stderr);
+
+            stdout.on('data', (chunk: Buffer) => {
+                chunks.push(chunk);
+            });
+
+            stdout.on('end', () => {
+                resolve(Buffer.concat(chunks));
+            });
+
+            stream.on('error', reject);
+        });
+    }
+
+    /**
+     * Get screenshot from emulator container.
+     */
+    async getScreenshot(containerId: string): Promise<Buffer> {
+        // Run screencap directly inside container
+        return this.execInContainerBuffer(containerId, ['screencap', '-p']);
     }
 
     /**
@@ -26,7 +71,11 @@ export class DockerService extends EventEmitter {
 
         logger.info(`Creating build container: ${containerName}`);
 
-        const uploadsPath = path.join(process.cwd(), 'uploads');
+        const uploadsPath = path.join(process.cwd(), 'uploads/shells');
+        const outputDir = path.join(uploadsPath, config.repoId, config.commit);
+        await fs.ensureDir(outputDir);
+
+        const scriptPath = path.resolve(__dirname, '../../../docker/build-shell.sh');
 
         const container = await this.docker.createContainer({
             Image: 'android-builder:latest',
@@ -44,12 +93,12 @@ export class DockerService extends EventEmitter {
                 Binds: [
                     `${env.GRADLE_CACHE_PATH}:/root/.gradle`,
                     `${env.NPM_CACHE_PATH}:/root/.npm`,
-                    // Mount host uploads to container /output
-                    `${uploadsPath}:/output`,
+                    // Mount specific host output dir to container /output/repo/commit
+                    `${outputDir}:/output/${config.repoId}/${config.commit}`,
                     // Mount the build script
-                    `${path.resolve(process.cwd(), '../docker/build-shell.sh')}:/usr/local/bin/build-shell.sh:ro`,
+                    `${scriptPath}:/usr/local/bin/build-shell.sh:ro`,
                 ],
-                AutoRemove: false,
+                AutoRemove: false, // Keep for debugging
             },
             Cmd: ['/bin/bash', '/usr/local/bin/build-shell.sh'],
         });
@@ -73,9 +122,9 @@ export class DockerService extends EventEmitter {
         // Wait for completion
         const result = await container.wait();
 
-        // Cleanup container
+        // Cleanup container since AutoRemove is false
         logger.info(`Removing build container: ${containerName}`);
-        await container.remove();
+        await container.remove().catch(err => logger.warn(`Failed to remove container ${containerName}: ${err}`));
 
         if (result.StatusCode !== 0) {
             throw new Error(`Build failed with exit code ${result.StatusCode}`);
@@ -160,7 +209,7 @@ export class DockerService extends EventEmitter {
         }
 
         const containerConfig: Docker.ContainerCreateOptions = {
-            Image: 'redroid:latest',
+            Image: 'redroid/redroid:11.0.0-latest',
             name: containerName,
             Env: [`METRO_URL=${config.metroUrl}`, `SHELL_APK_URL=${config.shellApkUrl}`],
             ExposedPorts: {
@@ -218,6 +267,14 @@ export class DockerService extends EventEmitter {
      * Execute command in container.
      */
     async execInContainer(containerId: string, cmd: string[]): Promise<string> {
+        const buffer = await this.execInContainerBuffer(containerId, cmd);
+        return buffer.toString('utf8');
+    }
+
+    /**
+     * Execute command in container and return Buffer.
+     */
+    async execInContainerBuffer(containerId: string, cmd: string[]): Promise<Buffer> {
         const container = this.docker.getContainer(containerId);
 
         const exec = await container.exec({
@@ -229,18 +286,43 @@ export class DockerService extends EventEmitter {
         const stream = await exec.start({ Detach: false });
 
         return new Promise((resolve, reject) => {
-            let output = '';
+            const chunks: Buffer[] = [];
 
             stream.on('data', (chunk: Buffer) => {
-                output += chunk.toString('utf8');
+                chunks.push(chunk);
             });
 
             stream.on('end', () => {
-                resolve(output);
+                resolve(Buffer.concat(chunks));
             });
 
             stream.on('error', reject);
         });
+    }
+
+    /**
+     * Get screenshot from emulator container.
+     */
+    async getScreenshot(containerId: string): Promise<Buffer> {
+        // Use adb shell screencap -p to get PNG
+        return this.execInContainerBuffer(containerId, ['adb', 'shell', 'screencap', '-p']);
+    }
+
+    /**
+     * Get screenshot from emulator container as JPEG (compressed).
+     */
+    async getScreenshotJpeg(containerId: string, quality: number = 80): Promise<Buffer> {
+        const pngBuffer = await this.getScreenshot(containerId);
+        try {
+            // Lazy load sharp to avoid startup issues if not installed
+            const sharp = require('sharp');
+            return await sharp(pngBuffer)
+                .jpeg({ quality, mozjpeg: true })
+                .toBuffer();
+        } catch (error) {
+            logger.warn(`Sharp optimization failed, falling back to PNG: ${error}`);
+            return pngBuffer;
+        }
     }
 
     /**

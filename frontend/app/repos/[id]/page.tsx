@@ -102,17 +102,23 @@ export default function RepoDetailPage() {
     };
 
     const handleStartSession = async () => {
-        if (!repo.shells?.some((s: any) => s.isCurrent)) {
+        const currentShell = repo.shells?.find((s: any) => s.isCurrent);
+        const latestSuccessBuild = repo.builds?.find((b: any) => b.status === 'SUCCESS');
+
+        if (!currentShell && !latestSuccessBuild) {
             alert('No shell APK available. Please build the project first.');
             return;
         }
 
         setStartingSession(true);
         try {
-            const currentShell = repo.shells.find((s: any) => s.isCurrent);
+            // Use shell ID if available, otherwise use build ID
+            // The backend supports passing a build ID as shellId
+            const targetId = currentShell?.shellId || latestSuccessBuild?.id;
+
             const res = await apiClient.createSession({
                 repoId,
-                shellId: currentShell.shellId,
+                shellId: targetId,
             });
             setSessionId(res.data.session.id);
         } catch (error) {
@@ -167,6 +173,8 @@ export default function RepoDetailPage() {
 
     const lastBuild = repo.builds?.[0];
     const currentShell = repo.shells?.find((s: any) => s.isCurrent)?.shell;
+    const latestSuccessBuild = repo.builds?.find((b: any) => b.status === 'SUCCESS');
+    const canLaunch = !!currentShell || !!latestSuccessBuild;
 
     return (
         <DashboardLayout>
@@ -207,7 +215,7 @@ export default function RepoDetailPage() {
                             ) : (
                                 <button
                                     onClick={handleStartSession}
-                                    disabled={startingSession || !currentShell}
+                                    disabled={startingSession || !canLaunch}
                                     className="flex items-center gap-2 px-4 py-2 bg-secondary text-secondary-foreground border border-border rounded-md hover:bg-secondary/80 transition-colors disabled:opacity-50"
                                 >
                                     <Smartphone className="h-4 w-4" />
@@ -263,7 +271,7 @@ export default function RepoDetailPage() {
                                 <span className="text-sm text-muted-foreground">Shell Status</span>
                             </div>
                             <p className="text-xl font-semibold">
-                                {currentShell ? '✓ Cached' : 'No Shell'}
+                                {currentShell ? '✓ Cached' : (latestSuccessBuild ? '✓ Build Ready' : 'No Shell')}
                             </p>
                         </div>
 
@@ -325,7 +333,7 @@ export default function RepoDetailPage() {
                         <Tabs defaultValue={sessionId ? "preview" : "builds"} className="w-full">
                             <TabsList className="mb-4">
                                 <TabsTrigger value="builds">Build History</TabsTrigger>
-                                <TabsTrigger value="preview" disabled={!sessionId && !currentShell}>
+                                <TabsTrigger value="preview" disabled={!sessionId && !canLaunch}>
                                     App Preview
                                 </TabsTrigger>
                                 <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -350,7 +358,7 @@ export default function RepoDetailPage() {
                                         </p>
                                         <button
                                             onClick={handleStartSession}
-                                            disabled={startingSession || !currentShell}
+                                            disabled={startingSession || !canLaunch}
                                             className="px-4 py-2 bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors disabled:opacity-50"
                                         >
                                             {startingSession ? 'Starting...' : 'Launch Preview'}

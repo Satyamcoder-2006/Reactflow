@@ -43,17 +43,19 @@ export class EmulatorService {
         userId: string;
         repoId: string;
         shellId?: string;
+        sessionId?: string; // Optional existing session ID
         config?: {
             deviceType?: string;
             androidVersion?: number;
         };
     }) {
-        logger.info(`Creating emulator session for repo ${config.repoId}`);
+        logger.info(`Creating/Initializing emulator session for repo ${config.repoId}`);
 
-        // Ensure Metro is running
-        const metroUrl = await this.metro.getMetroUrl(config.repoId);
+        // Ensure Metro is running (optional for demo/initial load)
+        let metroUrl = await this.metro.getMetroUrl(config.repoId);
         if (!metroUrl) {
-            throw new Error(`Metro bundler not running for repo ${config.repoId}`);
+            logger.warn(`Metro bundler not running for repo ${config.repoId}. Using default loopback.`);
+            metroUrl = 'http://10.0.2.2:8081'; // Android emulator loopback to host
         }
 
         // Resolve shell and APK URL if not provided
@@ -89,9 +91,11 @@ export class EmulatorService {
             }
         }
 
+        const internalSessionId = config.sessionId || crypto.randomUUID();
+
         // Start emulator container (with isolated networking)
         const { containerId, adbPort } = await this.docker.startEmulator({
-            sessionId: crypto.randomUUID(),
+            sessionId: internalSessionId,
             shellApkUrl: apkUrl!,
             metroUrl,
         });
@@ -101,19 +105,29 @@ export class EmulatorService {
             where: { repoId: config.repoId },
         });
 
-        // Create session record
-        const session = await prisma.emulatorSession.create({
-            data: {
-                repo: { connect: { id: config.repoId } },
-                user: { connect: { id: config.userId } },
-                shellId: shellId, // Directly use shellId string if relation is complex
-                metro: metroInstance ? { connect: { id: metroInstance.id } } : undefined,
-                containerId,
-                containerName: `emulator-${containerId.substring(0, 12)}`,
-                adbPort,
-                status: 'STARTING',
-            } as any,
-        });
+        // Create or Update session record
+        let session;
+        const sessionData = {
+            repo: { connect: { id: config.repoId } },
+            user: { connect: { id: config.userId } },
+            build: { connect: { id: shellId } }, // Linking to Build now as per new schema
+            metro: metroInstance ? { connect: { id: metroInstance.id } } : undefined,
+            containerId,
+            containerName: `emulator-${containerId.substring(0, 12)}`,
+            adbPort,
+            status: 'STARTING',
+        } as any;
+
+        if (config.sessionId) {
+            session = await prisma.emulatorSession.update({
+                where: { id: config.sessionId },
+                data: sessionData,
+            });
+        } else {
+            session = await prisma.emulatorSession.create({
+                data: sessionData,
+            });
+        }
 
         // Start watchdog for this session
         this.startWatchdog(session.id, containerId);
@@ -247,6 +261,36 @@ export class EmulatorService {
             'KEYCODE_R',
             'KEYCODE_R',
         ]);
+    }
+
+    /**
+     * Get screenshot from emulator.
+     */
+    async getScreenshot(sessionId: string, userId: string): Promise<Buffer> {
+        const session = await prisma.emulatorSession.findFirst({
+            where: { id: sessionId, userId },
+        });
+
+        if (!session || session.status !== 'RUNNING') {
+            throw new Error('Session not running');
+        }
+
+        return this.docker.getScreenshot(session.containerId);
+    }
+
+    /**
+     * Get JPEG screenshot from emulator.
+     */
+    async getScreenshotJpeg(sessionId: string, userId: string): Promise<Buffer> {
+        const session = await prisma.emulatorSession.findFirst({
+            where: { id: sessionId, userId },
+        });
+
+        if (!session || session.status !== 'RUNNING') {
+            throw new Error('Session not running');
+        }
+
+        return this.docker.getScreenshotJpeg(session.containerId);
     }
 
     private startWatchdog(sessionId: string, containerId: string) {
