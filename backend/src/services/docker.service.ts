@@ -208,10 +208,21 @@ export class DockerService extends EventEmitter {
             logger.warn(`Failed to create isolated network, using default bridge`);
         }
 
+
         const containerConfig: Docker.ContainerCreateOptions = {
-            Image: 'redroid/redroid:11.0.0-latest',
+            Image: 'redroid/redroid:12.0.0-latest', // Updated for better WSL2 compatibility
             name: containerName,
-            Env: [`METRO_URL=${config.metroUrl}`, `SHELL_APK_URL=${config.shellApkUrl}`],
+            Env: [
+                `METRO_URL=${config.metroUrl}`,
+                `SHELL_APK_URL=${config.shellApkUrl}`,
+                'REDROID_GPU_MODE=auto',  // Auto-detect best GPU mode
+                'REDROID_WIDTH=1080',
+                'REDROID_HEIGHT=2400',
+                'REDROID_FPS=30',
+                'REDROID_DPI=480',
+                'ro.kernel.qemu=1',  // Helps with emulator detection
+                'qemu.hw.mainkeys=0'  // Enable software navigation
+            ],
             ExposedPorts: {
                 '5555/tcp': {}, // ADB
             },

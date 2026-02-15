@@ -132,17 +132,105 @@ export class EmulatorService {
         // Start watchdog for this session
         this.startWatchdog(session.id, containerId);
 
-        // Mark as RUNNING after a short startup delay
-        setTimeout(async () => {
-            await prisma.emulatorSession.update({
-                where: { id: session.id },
-                data: { status: 'RUNNING', startedAt: new Date() },
-            }).catch(() => { /* session may have been stopped */ });
-        }, 10000);
+        // Wait for Android boot and install APK in background
+        this.waitForBootAndInstallApk(session.id, containerId, apkUrl!).catch(error => {
+            logger.error(`Failed to initialize emulator ${session.id}: ${error}`);
+        });
 
         logger.info(`Emulator session created: ${session.id}`);
 
         return session;
+    }
+
+    /**
+     * Wait for Android to boot, then install and launch the APK
+     */
+    private async waitForBootAndInstallApk(sessionId: string, containerId: string, apkPath: string) {
+        try {
+            logger.info(`Waiting for Android boot on ${sessionId}...`);
+
+            // Wait for boot completion (max 120 seconds)
+            const maxWaitTime = 120000;
+            const startTime = Date.now();
+            let booted = false;
+
+            while (Date.now() - startTime < maxWaitTime) {
+                try {
+                    const bootStatus = await this.docker.execInContainer(containerId, [
+                        'sh', '-c', 'getprop sys.boot_completed'
+                    ]);
+
+                    if (bootStatus.trim() === '1') {
+                        booted = true;
+                        logger.info(`Android booted on ${sessionId}`);
+                        break;
+                    }
+                } catch (error) {
+                    // Container might not be ready yet
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+
+            if (!booted) {
+                logger.warn(`Android boot timeout on ${sessionId}, attempting install anyway...`);
+            }
+
+            // Update status to installing
+            await prisma.emulatorSession.update({
+                where: { id: sessionId },
+                data: { status: 'INSTALLING_APK' },
+            }).catch(() => { });
+
+            // Install the APK
+            logger.info(`Installing APK on ${sessionId}: ${apkPath}`);
+            const installResult = await this.docker.execInContainer(containerId, [
+                'sh', '-c', `pm install -r ${apkPath}`
+            ]);
+
+            logger.info(`APK install result: ${installResult}`);
+
+            // List installed third-party packages
+            const packages = await this.docker.execInContainer(containerId, [
+                'sh', '-c', 'pm list packages -3'
+            ]);
+
+            // Extract package name (try common React Native package names first)
+            const lines = packages.split('\\n');
+            let packageName = lines.find(p => p.includes('com.anonymous') || p.includes('com.reactnativeapp'))
+                ?.replace('package:', '').trim();
+
+            if (!packageName && lines.length > 0) {
+                packageName = lines[0].replace('package:', '').trim();
+            }
+
+            if (!packageName) {
+                throw new Error('Could not determine installed package name');
+            }
+
+            logger.info(`Launching app ${packageName} on ${sessionId}`);
+
+            // Launch the app
+            await this.docker.execInContainer(containerId, [
+                'sh', '-c', `monkey -p ${packageName} -c android.intent.category.LAUNCHER 1`
+            ]);
+
+            // Mark as RUNNING
+            await prisma.emulatorSession.update({
+                where: { id: sessionId },
+                data: { status: 'RUNNING', startedAt: new Date() },
+            }).catch(() => { });
+
+            logger.info(`Emulator ${sessionId} is fully initialized and running`);
+
+        } catch (error) {
+            logger.error(`Boot/install failed for ${sessionId}: ${error}`);
+
+            await prisma.emulatorSession.update({
+                where: { id: sessionId },
+                data: { status: 'ERROR' },
+            }).catch(() => { });
+        }
     }
 
     /**
@@ -201,11 +289,10 @@ export class EmulatorService {
 
         switch (input.type) {
             case 'tap':
-                adbCommand = ['shell', 'input', 'tap', String(input.x), String(input.y)];
+                adbCommand = ['input', 'tap', String(input.x), String(input.y)];
                 break;
             case 'swipe':
                 adbCommand = [
-                    'shell',
                     'input',
                     'swipe',
                     String(input.x),
@@ -215,14 +302,14 @@ export class EmulatorService {
                 ];
                 break;
             case 'key':
-                adbCommand = ['shell', 'input', 'keyevent', input.key || ''];
+                adbCommand = ['input', 'keyevent', input.key || ''];
                 break;
             case 'text':
-                adbCommand = ['shell', 'input', 'text', input.text || ''];
+                adbCommand = ['input', 'text', input.text || ''];
                 break;
         }
 
-        await this.docker.execInContainer(session.containerId, ['adb', ...adbCommand]);
+        await this.docker.execInContainer(session.containerId, adbCommand);
 
         // Update activity timestamp
         await prisma.emulatorSession.update({
