@@ -3,7 +3,7 @@ import { WorkerContext } from './worker-auth';
 import { EventPublisher } from '../events/event-publisher';
 import { BuildEvent, BuildEventType } from '../events/event-types';
 import { DockerService } from '../services/docker.service';
-import { EmulatorService } from '../services/emulator.service';
+import { emulatorService } from '../services/emulator.service';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 import path from 'path';
@@ -16,7 +16,17 @@ WorkerContext.initialize().catch(err => {
 });
 
 const dockerService = new DockerService();
-const emulatorService = new EmulatorService();
+
+/** Resolve Android package name for a repo; falls back to 'com.anonymous'. */
+async function getPackageNameFromManifest(repoId: string): Promise<string> {
+    const prisma = WorkerContext.getPrisma();
+    const repo = await prisma.repo.findUnique({ where: { id: repoId } });
+    // If a packageName field is stored on the repo, use it
+    const storedName = (repo as any)?.packageName as string | undefined;
+    if (storedName) return storedName;
+    logger.warn(`[shell-builder] No packageName for repo ${repoId}, using com.anonymous`);
+    return 'com.anonymous';
+}
 
 interface ShellBuildJob {
     buildId: string;
@@ -39,6 +49,13 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
         logger.info(`[shell-builder] Starting build ${buildId} for commit ${commit}`);
 
         try {
+            // Guard: check if the build record still exists (e.g. DB was reset)
+            const existingBuild = await prisma.build.findUnique({ where: { id: buildId } });
+            if (!existingBuild) {
+                logger.warn(`[shell-builder] Build ${buildId} not found in DB — skipping stale job.`);
+                return { success: false, skipped: true };
+            }
+
             // Update status to BUILDING
             await prisma.build.update({
                 where: { id: buildId },
@@ -121,6 +138,14 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
             });
 
             await publisher.publishBuildSuccess(buildId, userId, repoId, apkUrl);
+
+            // Auto-deploy to any active emulator session for this repo (non-fatal)
+            try {
+                const packageName = await getPackageNameFromManifest(repoId);
+                await emulatorService.deployToExistingSession(repoId, apkUrl, packageName);
+            } catch (deployErr) {
+                logger.warn(`[shell-builder] Emulator auto-deploy failed (non-fatal): ${deployErr}`);
+            }
 
             // Auto-start session if requested
             if (autoStartSession) {

@@ -11,7 +11,18 @@ RUN apt-get update && apt-get install -y \
     git \
     curl \
     build-essential \
+    android-tools-adb \
+    ffmpeg \
+    libsdl2-2.0-0 \
     && rm -rf /var/lib/apt/lists/*
+
+# Install scrcpy from GitHub release (apt version may be outdated)
+ARG SCRCPY_VERSION=2.3.1
+RUN wget -q https://github.com/Genymobile/scrcpy/releases/download/v${SCRCPY_VERSION}/scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz \
+    && tar -xzf scrcpy-linux-x86_64-v${SCRCPY_VERSION}.tar.gz \
+    && mv scrcpy /usr/local/bin/scrcpy \
+    && chmod +x /usr/local/bin/scrcpy \
+    && rm -f scrcpy-linux-*.tar.gz
 
 # Install Android SDK
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
@@ -51,6 +62,10 @@ RUN mkdir -p /root/.gradle && \
     echo "org.gradle.vfs.watch=false" >> /root/.gradle/gradle.properties
 
 WORKDIR /app
+
+# ADB and scrcpy path environment variables
+ENV ADB_PATH=/usr/bin/adb
+ENV SCRCPY_PATH=/usr/local/bin/scrcpy
 
 # The command to run the build script will be provided by the worker
 CMD ["/bin/bash"]

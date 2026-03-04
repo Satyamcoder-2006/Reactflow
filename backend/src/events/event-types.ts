@@ -43,3 +43,40 @@ export interface SessionEvent {
     };
     timestamp: Date;
 }
+
+// ---------------------------------------------------------------------------
+// Session Lifecycle
+// ---------------------------------------------------------------------------
+
+export enum SessionLifecycleStep {
+    PENDING = 'PENDING',
+    BOOTING = 'BOOTING',
+    INSTALLING_APK = 'INSTALLING_APK',
+    SETTING_UP_METRO = 'SETTING_UP_METRO',
+    LAUNCHING_APP = 'LAUNCHING_APP',
+    STREAM_STARTING = 'STREAM_STARTING',
+    LIVE = 'LIVE',
+    WAITING_FOR_BUILD = 'WAITING_FOR_BUILD',
+    ERROR = 'ERROR',
+}
+
+export interface SessionLifecycleEvent {
+    sessionId: string;
+    step: SessionLifecycleStep;
+    message?: string;
+    timestamp: number;
+}
+
+export interface TapInputEvent {
+    sessionId: string;
+    x: number;
+    y: number;
+    frontendWidth: number;
+    frontendHeight: number;
+}
+
+export interface SwipeInputEvent extends TapInputEvent {
+    x2: number;
+    y2: number;
+    duration: number;
+}

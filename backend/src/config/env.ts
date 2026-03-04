@@ -37,6 +37,16 @@ export const env = {
 
     // Logging
     LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+
+    // Emulator / ADB
+    ADB_PATH: process.env.ADB_PATH || 'adb',
+    SCRCPY_PATH: process.env.SCRCPY_PATH || 'scrcpy',
+    REDROID_SCREEN_WIDTH: parseInt(process.env.REDROID_SCREEN_WIDTH || '412'),
+    REDROID_SCREEN_HEIGHT: parseInt(process.env.REDROID_SCREEN_HEIGHT || '892'),
+    REDROID_FPS: parseInt(process.env.REDROID_FPS || '30'),
+    APK_TEMP_DIR: process.env.APK_TEMP_DIR || '/tmp/apks',
+    EMULATOR_NETWORK: process.env.EMULATOR_NETWORK || 'reactflow_emulator',
+    REDROID_ADB_PORT: parseInt(process.env.REDROID_ADB_PORT || '5555'),
 };
 
 // Validate required environment variables

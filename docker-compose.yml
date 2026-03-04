@@ -1,3 +1,8 @@
+# IMPORTANT: Before starting Redroid, run these on the Linux host:
+# sudo modprobe binder_linux devices="binder,hwbinder,vndbinder"
+# sudo modprobe ashmem_linux
+# These kernel modules are required for Redroid (Android-in-Docker) to boot.
+
 version: '3.8'
 
 services:
@@ -21,6 +26,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: reactflow-redis
+    command: redis-server --stop-writes-on-bgsave-error no --save ""
     ports:
       - "6379:6379"
     volumes:
@@ -31,6 +37,31 @@ services:
       timeout: 3s
       retries: 5
 
+  redroid:
+    image: redroid/redroid:12.0.0-latest
+    container_name: reactflow-redroid
+    privileged: true
+    command:
+      - redroid.gpu=0
+      - redroid.width=412
+      - redroid.height=892
+      - redroid.fps=30
+      - redroid.bootstrapPort=9977
+    ports:
+      - "5555:5555"
+    networks:
+      - reactflow_emulator
+    restart: unless-stopped
+    volumes:
+      - redroid_data:/data
+
 volumes:
   postgres_data:
   redis_data:
+  redroid_data:
+  apk_temp:
+
+
+networks:
+  reactflow_emulator:
+    driver: bridge
