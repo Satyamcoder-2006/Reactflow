@@ -29,7 +29,7 @@ export function EmulatorViewer({
     // ── Stream URL ────────────────────────────────────────────────────────────
     useEffect(() => {
         const token = typeof window !== 'undefined' ? localStorage.getItem('token') : '';
-        const url = `${API_URL}/sessions/${sessionId}/stream?t=${Date.now()}`;
+        const url = `${API_URL}/api/sessions/${sessionId}/stream?t=${Date.now()}`;
         setStreamUrl(url);
         setHasError(false);
 
@@ -59,7 +59,7 @@ export function EmulatorViewer({
             const coords = getScaledCoords(clientX, clientY);
             if (!coords) return;
 
-            await fetch(`${API_URL}/sessions/${sessionId}/tap`, {
+            await fetch(`${API_URL}/api/sessions/${sessionId}/tap`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -84,7 +84,7 @@ export function EmulatorViewer({
             fw: number, fh: number,
             duration: number,
         ) => {
-            await fetch(`${API_URL}/sessions/${sessionId}/swipe`, {
+            await fetch(`${API_URL}/api/sessions/${sessionId}/swipe`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -99,7 +99,7 @@ export function EmulatorViewer({
     // ── Send key ──────────────────────────────────────────────────────────────
     const sendKey = useCallback(
         async (keycode: string) => {
-            await fetch(`${API_URL}/sessions/${sessionId}/input/key`, {
+            await fetch(`${API_URL}/api/sessions/${sessionId}/input/key`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -188,7 +188,7 @@ export function EmulatorViewer({
 
         // Text input
         if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
-            await fetch(`${API_URL}/sessions/${sessionId}/input`, {
+            await fetch(`${API_URL}/api/sessions/${sessionId}/input`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -206,7 +206,7 @@ export function EmulatorViewer({
 
     const handleRetry = () => {
         setHasError(false);
-        setStreamUrl(`${API_URL}/sessions/${sessionId}/stream?t=${Date.now()}`);
+        setStreamUrl(`${API_URL}/api/sessions/${sessionId}/stream?t=${Date.now()}`);
     };
 
     return (

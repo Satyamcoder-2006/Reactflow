@@ -14,7 +14,7 @@ export function DeviceControls({ sessionId, disabled = false }: DeviceControlsPr
     const sendKey = async (keycode: string) => {
         if (disabled) return;
 
-        await fetch(`${API_URL}/sessions/${sessionId}/input/key`, {
+        await fetch(`${API_URL}/api/sessions/${sessionId}/input/key`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -102,7 +102,7 @@ export function DeviceControls({ sessionId, disabled = false }: DeviceControlsPr
             <button
                 onClick={async () => {
                     if (disabled) return;
-                    const res = await fetch(`${API_URL}/sessions/${sessionId}/screen`, {
+                    const res = await fetch(`${API_URL}/api/sessions/${sessionId}/screen`, {
                         headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
                     });
                     if (!res.ok) return;

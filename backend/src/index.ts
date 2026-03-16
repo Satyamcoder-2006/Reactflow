@@ -3,6 +3,7 @@ import { env } from './config/env';
 import { prisma } from './db/prisma';
 import { redis } from './config/redis';
 import { WorkerContext } from './workers/worker-auth';
+// @ts-ignore
 import killPort from 'kill-port';
 
 async function start() {

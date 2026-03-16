@@ -72,14 +72,22 @@ export async function addShellBuildJob(data: {
         androidVersion: number;
     };
 }) {
-    const jobId = `shell-build-${data.repoId}-${data.commit}`;
+    // Using buildId as jobId ensures every DB build record maps to a unique job.
+    const jobId = data.buildId;
 
-    // Remove any waiting jobs for the same repo (dedup)
+    // Remove any existing job with this ID (stale/failed/etc) to ensure fresh queueing
+    const existingJob = await shellBuildQueue.getJob(jobId);
+    if (existingJob) {
+        logger.info(`Removing existing job ${jobId} before re-queuing`);
+        await existingJob.remove().catch(() => { });
+    }
+
+    // Remove any other waiting jobs for the same repo (aggressive dedup)
     const waitingJobs = await shellBuildQueue.getJobs(['waiting', 'delayed']);
     for (const job of waitingJobs) {
         if (job.data?.repoId === data.repoId && job.id !== jobId) {
             logger.info(`Dedup: Removing stale build job ${job.id} for repo ${data.repoId}`);
-            await job.remove().catch(() => { /* job may have already started */ });
+            await job.remove().catch(() => { });
         }
     }
 

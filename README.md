@@ -35,12 +35,13 @@ reactflow/
 │   │   ├── middleware/         # Auth middleware
 │   │   ├── queues/             # BullMQ queue definitions
 │   │   ├── routes/             # REST API routes
+│   │   │   ├── admin.ts        # Admin utilities
 │   │   │   ├── auth.ts         # GitHub OAuth callback
 │   │   │   ├── builds.ts       # Build trigger & status
-│   │   │   ├── emulator.ts     # Emulator session management
-│   │   │   ├── preview.ts      # MJPEG stream proxy
 │   │   │   ├── repos.ts        # Repository management
-│   │   │   └── webhooks.ts     # GitHub webhook receiver
+│   │   │   ├── sessions.ts     # Emulator session management & stream proxy
+│   │   │   ├── webhooks.ts     # GitHub webhook receiver
+│   │   │   └── webrtc.ts       # WebRTC signaling
 │   │   ├── services/
 │   │   │   ├── adb.service.ts           # ADB commands: connect, install, launch, stream
 │   │   │   ├── change-detection.service.ts  # Git diff analyzer
@@ -56,6 +57,7 @@ reactflow/
 │   │   │   ├── emulator-manager.worker.ts # Emulator start/stop lifecycle
 │   │   │   ├── metro-manager.worker.ts  # Metro server start/stop
 │   │   │   ├── session-cleanup.worker.ts # TTL-based session GC
+│   │   │   ├── index.ts                 # Worker entrypoint
 │   │   │   └── worker-auth.ts           # Shared worker auth
 │   │   ├── schemas/            # Fastify JSON schemas
 │   │   ├── types/              # TypeScript interfaces
@@ -136,7 +138,7 @@ reactflow/
 GitHub Push
     │
     ▼
-Webhook Route (POST /webhooks/github)
+Webhook Route (POST /api/webhooks/github)
     │
     ▼
 Change Detection Service

@@ -14,6 +14,28 @@ export class DockerService extends EventEmitter {
         this.docker = new Docker();
     }
 
+    /**
+     * Remove a container if it exists and is not running.
+     * Throws an error if the container is currently running.
+     */
+    private async removeStaleContainer(containerName: string): Promise<void> {
+        try {
+            const container = this.docker.getContainer(containerName);
+            const info = await container.inspect();
+
+            if (info.State.Running) {
+                logger.warn(`Container ${containerName} is still running — skipping removal`);
+                throw new Error(`Build container ${containerName} is already active`);
+            }
+
+            logger.info(`Removing stale container: ${containerName}`);
+            await container.remove({ force: true });
+        } catch (err: any) {
+            if (err.statusCode === 404) return; // Container doesn't exist
+            throw err;
+        }
+    }
+
     // ... existing code ...
 
     /**
@@ -69,6 +91,8 @@ export class DockerService extends EventEmitter {
     }): Promise<string> {
         const containerName = `build-${config.buildId}`;
 
+        await this.removeStaleContainer(containerName);
+
         logger.info(`Creating build container: ${containerName}`);
 
         const uploadsPath = path.join(process.cwd(), 'uploads/shells');
@@ -77,57 +101,71 @@ export class DockerService extends EventEmitter {
 
         const scriptPath = path.resolve(__dirname, '../../../docker/build-shell.sh');
 
-        const container = await this.docker.createContainer({
-            Image: 'android-builder:latest',
-            name: containerName,
-            Env: [
-                `REPO_ID=${config.repoId}`,
-                `REPO_URL=${config.repoUrl}`,
-                `BRANCH=${config.branch}`,
-                `COMMIT=${config.commit}`,
-                `BUILD_ID=${config.buildId}`,
-            ],
-            HostConfig: {
-                Memory: 4 * 1024 * 1024 * 1024, // 4GB
-                CpuQuota: 400000, // 4 cores
-                Binds: [
-                    `${env.GRADLE_CACHE_PATH}:/root/.gradle`,
-                    `${env.NPM_CACHE_PATH}:/root/.npm`,
-                    // Mount specific host output dir to container /output/repo/commit
-                    `${outputDir}:/output/${config.repoId}/${config.commit}`,
-                    // Mount the build script
-                    `${scriptPath}:/usr/local/bin/build-shell.sh:ro`,
+        let container: Docker.Container | undefined;
+        try {
+            container = await this.docker.createContainer({
+                Image: 'android-builder:latest',
+                name: containerName,
+                Env: [
+                    `REPO_ID=${config.repoId}`,
+                    `REPO_URL=${config.repoUrl}`,
+                    `BRANCH=${config.branch}`,
+                    `COMMIT=${config.commit}`,
+                    `BUILD_ID=${config.buildId}`,
                 ],
-                AutoRemove: false, // Keep for debugging
-            },
-            Cmd: ['/bin/bash', '/usr/local/bin/build-shell.sh'],
-        });
+                HostConfig: {
+                    Memory: 4 * 1024 * 1024 * 1024, // 4GB
+                    CpuQuota: 400000, // 4 cores
+                    Binds: [
+                        `${env.GRADLE_CACHE_PATH}:/root/.gradle`,
+                        `${env.NPM_CACHE_PATH}:/root/.npm`,
+                        `${outputDir}:/output/${config.repoId}/${config.commit}`,
+                        `${scriptPath}:/usr/local/bin/build-shell.sh:ro`,
+                    ],
+                    AutoRemove: true, // Automatically clean up on exit
+                },
+                Cmd: ['/bin/bash', '/usr/local/bin/build-shell.sh'],
+                Tty: true, // Enable TTY for clean log output
+            });
 
-        // Attach to container output
-        const stream = await container.attach({
-            stream: true,
-            stdout: true,
-            stderr: true,
-        });
+            // Attach to container output before starting
+            const stream = await container.attach({
+                stream: true,
+                stdout: true,
+                stderr: true,
+            });
 
-        stream.on('data', (chunk: Buffer) => {
-            const log = chunk.toString('utf8');
-            this.emit('log', { buildId: config.buildId, message: log });
-        });
+            stream.on('data', (chunk: Buffer) => {
+                const log = chunk.toString('utf8');
+                this.emit('log', { buildId: config.buildId, message: log });
+            });
 
-        // Start container
-        logger.info(`Starting build container: ${containerName}`);
-        await container.start();
+            // Start container
+            logger.info(`Starting build container: ${containerName}`);
+            await container.start();
 
-        // Wait for completion
-        const result = await container.wait();
+            // Wait for completion
+            const result = await container.wait();
 
-        // Cleanup container since AutoRemove is false
-        logger.info(`Removing build container: ${containerName}`);
-        await container.remove().catch(err => logger.warn(`Failed to remove container ${containerName}: ${err}`));
-
-        if (result.StatusCode !== 0) {
-            throw new Error(`Build failed with exit code ${result.StatusCode}`);
+            if (result.StatusCode !== 0) {
+                throw new Error(`Build failed with exit code ${result.StatusCode}`);
+            }
+        } finally {
+            if (container) {
+                try {
+                    // Even with AutoRemove: true, we attempt a remove call to be safe
+                    // If AutoRemove already worked, this will throw 404 which we catch
+                    await container.remove({ force: true });
+                    logger.debug(`Container ${containerName} manually removed in finally block`);
+                } catch (err: any) {
+                    if (err.statusCode === 409) {
+                        logger.debug(`Container ${containerName} removal already in progress (AutoRemove likely handled it)`);
+                    } else if (err.statusCode !== 404) {
+                        logger.warn(`Container cleanup failed for ${containerName}: ${err.message}`);
+                    }
+                    // 404/409 are expected or acceptable if AutoRemove is active
+                }
+            }
         }
 
         // Return local URL prefix
@@ -282,42 +320,7 @@ export class DockerService extends EventEmitter {
         return buffer.toString('utf8');
     }
 
-    /**
-     * Execute command in container and return Buffer.
-     */
-    async execInContainerBuffer(containerId: string, cmd: string[]): Promise<Buffer> {
-        const container = this.docker.getContainer(containerId);
 
-        const exec = await container.exec({
-            Cmd: cmd,
-            AttachStdout: true,
-            AttachStderr: true,
-        });
-
-        const stream = await exec.start({ Detach: false });
-
-        return new Promise((resolve, reject) => {
-            const chunks: Buffer[] = [];
-
-            stream.on('data', (chunk: Buffer) => {
-                chunks.push(chunk);
-            });
-
-            stream.on('end', () => {
-                resolve(Buffer.concat(chunks));
-            });
-
-            stream.on('error', reject);
-        });
-    }
-
-    /**
-     * Get screenshot from emulator container.
-     */
-    async getScreenshot(containerId: string): Promise<Buffer> {
-        // Use adb shell screencap -p to get PNG
-        return this.execInContainerBuffer(containerId, ['adb', 'shell', 'screencap', '-p']);
-    }
 
     /**
      * Get screenshot from emulator container as JPEG (compressed).

@@ -66,27 +66,59 @@ export class EmulatorService {
 
     /**
      * Get the IP address of a Docker container on the emulator network.
-     *
-     * Tries `env.EMULATOR_NETWORK` first, then falls back to "bridge".
+     * Uses a polling loop to wait for the network to attach.
      */
     async getContainerIp(containerId: string): Promise<string> {
+        const MAX_ATTEMPTS = 10;
+        const DELAY = 500;
+
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            const container = (this.docker as any).docker.getContainer(containerId);
+            const data = await container.inspect();
+
+            // Fail fast if container is not running
+            if (!data.State.Running) {
+                throw new Error(`Container ${containerId} is not running (Status: ${data.State.Status})`);
+            }
+
+            const networks = data.NetworkSettings?.Networks ?? {};
+
+            // 1. Try preferred network
+            let ip = networks[env.EMULATOR_NETWORK]?.IPAddress;
+
+            // 2. Try bridge
+            if (!ip) ip = networks['bridge']?.IPAddress;
+
+            // 3. Fallback: Search ALL networks for any IP (network-agnostic)
+            if (!ip) {
+                for (const netName in networks) {
+                    if (networks[netName].IPAddress) {
+                        ip = networks[netName].IPAddress;
+                        logger.debug(`[EmulatorService] Found IP ${ip} on network: ${netName}`);
+                        break;
+                    }
+                }
+            }
+
+            if (ip) {
+                if (attempt > 1) {
+                    logger.info(`[EmulatorService] IP ${ip} found for ${containerId} on attempt ${attempt}`);
+                }
+                return ip;
+            }
+
+            logger.debug(`[EmulatorService] IP not found for ${containerId} (attempt ${attempt}/${MAX_ATTEMPTS}). Retrying...`);
+            await sleep(DELAY);
+        }
+
         const container = (this.docker as any).docker.getContainer(containerId);
         const data = await container.inspect();
         const networks = data.NetworkSettings?.Networks ?? {};
 
-        const ip =
-            networks[env.EMULATOR_NETWORK]?.IPAddress ||
-            networks['bridge']?.IPAddress;
-
-        if (!ip) {
-            throw new Error(
-                `Cannot find IP for container ${containerId} ` +
-                `(networks: ${Object.keys(networks).join(', ')})`,
-            );
-        }
-
-        logger.info(`[EmulatorService] container ${containerId} IP: ${ip}`);
-        return ip;
+        throw new Error(
+            `Timed out waiting for IP for container ${containerId} ` +
+            `(networks: ${Object.keys(networks).join(', ') || 'none'})`
+        );
     }
 
     // -------------------------------------------------------------------------

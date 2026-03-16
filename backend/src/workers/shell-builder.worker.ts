@@ -87,6 +87,12 @@ export const shellBuilderWorker = new Worker<ShellBuildJob>(
 
             const logListener = ({ buildId: logId, message }: { buildId: string, message: string }) => {
                 if (logId === buildId) {
+                    // Also log to worker console for visibility
+                    const cleanLog = message.replace(/\u0000/g, '').trim();
+                    if (cleanLog) {
+                        logger.info(`[build-log] ${cleanLog}`);
+                    }
+
                     logBuffer.push(message);
                     if (logBuffer.length >= BATCH_SIZE) {
                         flushLogs();
